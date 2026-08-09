@@ -5,16 +5,22 @@
 import * as path from "node:path";
 import { glob } from "tinyglobby";
 import { ToolError } from "../host.ts";
-import { hasBinary, resolvePath, run, statOrNull } from "./util.ts";
+import { hasBinary, resolvePath, run, splitGlobEntry, statOrNull } from "./util.ts";
 
 export async function collectFiles(entries: string[], cwd: string, signal?: AbortSignal): Promise<string[]> {
+	// Glob entries anchor at their own static base dir (absolute/~ globs work);
+	// plain directory entries scan fully.
+	const globsByBase = new Map<string, string[]>();
 	const roots: string[] = [];
-	const globPatterns: string[] = [];
 	const direct: string[] = [];
 
 	for (const entry of entries) {
-		if (/[*?[{]/.test(entry)) {
-			globPatterns.push(entry);
+		const split = splitGlobEntry(entry, cwd);
+		if (split) {
+			if (!(await statOrNull(split.base))?.isDirectory()) {
+				throw new ToolError(`Glob base directory not found: ${split.base} (from ${entry})`);
+			}
+			globsByBase.set(split.base, [...(globsByBase.get(split.base) ?? []), split.glob]);
 			continue;
 		}
 		const abs = resolvePath(entry, cwd);
@@ -25,29 +31,27 @@ export async function collectFiles(entries: string[], cwd: string, signal?: Abor
 	}
 
 	const found: string[] = [...direct];
-	if (roots.length > 0 || globPatterns.length > 0) {
-		if (await hasBinary("rg")) {
-			for (const root of roots.length > 0 ? roots : [cwd]) {
-				const args = ["--files", "--hidden", "-g", "!.git"];
-				for (const pattern of globPatterns) args.push("-g", pattern.includes("/") ? pattern : `**/${pattern}`);
-				const result = await run("rg", args, { cwd: root, signal, timeoutMs: 20_000, maxBuffer: 64 * 1024 * 1024 });
-				for (const line of result.stdout.split("\n")) {
-					if (line) found.push(path.resolve(root, line));
-				}
+	const useRg = await hasBinary("rg");
+	const scan = async (base: string, patterns: string[]): Promise<void> => {
+		if (useRg) {
+			const args = ["--files", "--hidden", "-g", "!.git"];
+			for (const pattern of patterns) args.push("-g", pattern);
+			const result = await run("rg", args, { cwd: base, signal, timeoutMs: 20_000, maxBuffer: 64 * 1024 * 1024 });
+			for (const line of result.stdout.split("\n")) {
+				if (line) found.push(path.resolve(base, line));
 			}
 		} else {
-			const patterns = globPatterns.length > 0 ? globPatterns : ["**/*"];
-			for (const root of roots.length > 0 ? roots : [cwd]) {
-				const matches = await glob(patterns, {
-					cwd: root,
-					dot: true,
-					onlyFiles: true,
-					ignore: ["**/.git/**", "**/node_modules/**"],
-					absolute: true,
-				});
-				found.push(...matches);
-			}
+			const matches = await glob(patterns.length > 0 ? patterns : ["**/*"], {
+				cwd: base,
+				dot: true,
+				onlyFiles: true,
+				ignore: ["**/.git/**", "**/node_modules/**"],
+				absolute: true,
+			});
+			found.push(...matches);
 		}
-	}
+	};
+	for (const [base, patterns] of globsByBase) await scan(base, patterns);
+	for (const root of roots) await scan(root, []);
 	return [...new Set(found.map(p => path.resolve(cwd, p)))];
 }

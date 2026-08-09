@@ -6,7 +6,16 @@
 import * as path from "node:path";
 import { glob } from "tinyglobby";
 import { ToolError, textResult, type ToolCtx, type ToolResult } from "../host.ts";
-import { displayPath, hasBinary, resolvePath, run, splitPathList, statOrNull } from "../shared/util.ts";
+import {
+	displayPath,
+	hasBinary,
+	hasGlobMagic,
+	resolvePath,
+	run,
+	splitGlobEntry,
+	splitPathList,
+	statOrNull,
+} from "../shared/util.ts";
 
 export interface FindParams {
 	path?: string;
@@ -57,13 +66,19 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 	const gitignore = params.gitignore !== false;
 	const entries = splitPathList(params.path ?? ".");
 
-	const globPatterns: string[] = [];
+	// Each glob entry is anchored at its own static base dir so absolute and
+	// `~` globs work; plain directory entries scan fully.
+	const globsByBase = new Map<string, string[]>();
 	const roots: string[] = [];
 	const directHits: string[] = [];
 
 	for (const entry of entries) {
-		if (/[*?[{]/.test(entry)) {
-			globPatterns.push(entry);
+		const split = splitGlobEntry(entry, cwd);
+		if (split) {
+			if (!(await statOrNull(split.base))?.isDirectory()) {
+				throw new ToolError(`Glob base directory not found: ${split.base} (from ${entry})`);
+			}
+			globsByBase.set(split.base, [...(globsByBase.get(split.base) ?? []), split.glob]);
 			continue;
 		}
 		const abs = resolvePath(entry, cwd);
@@ -72,20 +87,16 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 		if (stat.isDirectory()) roots.push(abs);
 		else directHits.push(abs);
 	}
-	if (globPatterns.length === 0 && roots.length === 0 && directHits.length === 0) roots.push(cwd);
-	if (globPatterns.length > 0 && roots.length === 0) roots.push(cwd);
+	if (globsByBase.size === 0 && roots.length === 0 && directHits.length === 0) roots.push(cwd);
 
-	let found: string[] = [];
-	if (await hasBinary("rg")) {
-		if (globPatterns.length > 0 || roots.length > 0) {
-			const patterns = globPatterns.length > 0 ? globPatterns.map(p => (p.includes("/") ? p : `**/${p}`)) : [];
-			found = await ripgrepFiles(patterns, roots.length > 0 ? roots : [cwd], hidden, gitignore, signal);
-		}
-	} else {
-		const patterns = globPatterns.length > 0 ? globPatterns : ["**/*"];
-		for (const root of roots.length > 0 ? roots : [cwd]) {
-			const matches = await glob(patterns, {
-				cwd: root,
+	const found: string[] = [];
+	const useRg = await hasBinary("rg");
+	const scan = async (base: string, patterns: string[]): Promise<void> => {
+		if (useRg) {
+			found.push(...(await ripgrepFiles(patterns, [base], hidden, gitignore, signal)));
+		} else {
+			const matches = await glob(patterns.length > 0 ? patterns : ["**/*"], {
+				cwd: base,
 				dot: hidden,
 				onlyFiles: false,
 				ignore: ["**/.git/**", "**/node_modules/**"],
@@ -93,7 +104,9 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 			});
 			found.push(...matches);
 		}
-	}
+	};
+	for (const [base, patterns] of globsByBase) await scan(base, patterns);
+	for (const root of roots) await scan(root, []);
 	found.push(...directHits);
 
 	// Dedup + stat (newest-first ordering, dir detection).

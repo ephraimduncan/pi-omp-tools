@@ -189,3 +189,31 @@ export function denormalizeText(text: string, opts: { hadBom: boolean; crlf: boo
 	if (opts.hadBom) out = `\uFEFF${out}`;
 	return out;
 }
+
+const GLOB_MAGIC_RE = /[*?[{]/;
+
+export function hasGlobMagic(entry: string): boolean {
+	return GLOB_MAGIC_RE.test(entry);
+}
+
+/**
+ * Split a glob entry into an absolute static base directory and the glob
+ * remainder relative to it, so `-g` filters match rg's printed (relative)
+ * paths. Handles absolute paths, `~`, `@`, and cwd-relative entries:
+ *   "/Users/x/qa/*.py"  -> { base: "/Users/x/qa", glob: "*.py" }
+ *   "~/qa/docs/*.md"    -> { base: "<home>/qa/docs", glob: "*.md" }
+ *   "src/**\/*.ts"       -> { base: "<cwd>/src", glob: "**\/*.ts" }
+ *   "*.py"              -> { base: "<cwd>", glob: "*.py" }
+ * Returns null when the entry has no glob magic.
+ */
+export function splitGlobEntry(entry: string, cwd: string): { base: string; glob: string } | null {
+	if (!hasGlobMagic(entry)) return null;
+	const normalized = entry.replace(/^@/, "");
+	const segments = normalized.split("/");
+	let firstMagic = segments.findIndex(segment => GLOB_MAGIC_RE.test(segment));
+	if (firstMagic === -1) firstMagic = segments.length - 1;
+	const staticPrefix = segments.slice(0, firstMagic).join("/");
+	const globRemainder = segments.slice(firstMagic).join("/");
+	const base = resolvePath(staticPrefix === "" ? (normalized.startsWith("/") ? "/" : ".") : staticPrefix, cwd);
+	return { base, glob: globRemainder };
+}

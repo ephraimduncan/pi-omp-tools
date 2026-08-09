@@ -400,3 +400,62 @@ test("renderers: fake host produces colored bodies", async () => {
 	assert.match(readOut.text, /c\.ts #CCCC/);
 	assert.match(readOut.text, /1 const x = 1;/);
 });
+
+test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", async () => {
+	const dir = await makeTempDir();
+	await fs.mkdir(path.join(dir, "src"), { recursive: true });
+	await fs.mkdir(path.join(dir, "docs"), { recursive: true });
+	await fs.writeFile(path.join(dir, "app.py"), "print(1)\n");
+	await fs.writeFile(path.join(dir, "src", "a.ts"), "const needleZ = 1;\n");
+	await fs.writeFile(path.join(dir, "docs", "d.md"), "# needleZ doc\n");
+
+	// find: absolute glob, from an UNRELATED cwd
+	const otherCwd = await makeTempDir();
+	const absFind = text(await executeFind({ path: `${dir}/*.py`, gitignore: false }, { cwd: otherCwd }));
+	assert.match(absFind, /app\.py/);
+	const absDeep = text(await executeFind({ path: `${dir}/**/*.ts`, gitignore: false }, { cwd: otherCwd }));
+	assert.match(absDeep, /a\.ts/);
+	const absDocs = text(await executeFind({ path: `${dir}/docs/*.md`, gitignore: false }, { cwd: otherCwd }));
+	assert.match(absDocs, /d\.md/);
+
+	// search: absolute glob from unrelated cwd
+	const absSearch = text(await executeSearch({ pattern: "needleZ", path: `${dir}/*.ts; ${dir}/**/*.ts` }, { cwd: otherCwd }));
+	assert.match(absSearch, /a\.ts/);
+
+	// ast_grep: absolute glob from unrelated cwd
+	const absAst = text(await executeAstGrep({ pat: "const $N = $V" , path: `${dir}/src/*.ts` }, { cwd: otherCwd }));
+	assert.match(absAst, /needleZ/);
+
+	// missing base dir errors loudly instead of silent no-match
+	await assert.rejects(
+		executeFind({ path: `${dir}/nonexistent/*.py` }, { cwd: otherCwd }),
+		/Glob base directory not found/,
+	);
+});
+
+test("BUG2 regression: URL selector parsing (bare domain, trailing slash, port)", async () => {
+	const { parseUrlTarget } = await import("../packages/omp-tools-core/src/tools/read.ts");
+	// bare domain :raw
+	const bare = parseUrlTarget("https://example.com:raw");
+	assert.equal(bare.url, "https://example.com");
+	assert.equal(bare.selector?.raw, true);
+	// trailing slash :raw
+	const slash = parseUrlTarget("https://example.com/:raw");
+	assert.equal(slash.url, "https://example.com/");
+	assert.equal(slash.selector?.raw, true);
+	// port stays a port
+	const port = parseUrlTarget("https://host:8080");
+	assert.equal(port.url, "https://host:8080");
+	assert.equal(port.selector, null);
+	// port + trailing slash + range selects lines
+	const portRange = parseUrlTarget("https://host:8080/:50");
+	assert.equal(portRange.url, "https://host:8080/");
+	assert.deepEqual(portRange.selector?.ranges, [{ start: 50, end: 50 }]);
+	// path + range
+	const ranged = parseUrlTarget("https://x.com/docs/page:10-20");
+	assert.equal(ranged.url, "https://x.com/docs/page");
+	assert.deepEqual(ranged.selector?.ranges, [{ start: 10, end: 20 }]);
+	// bare domain numeric — ambiguous, stays port-ish (documented)
+	const ambiguous = parseUrlTarget("https://example.com:50");
+	assert.equal(ambiguous.selector, null);
+});

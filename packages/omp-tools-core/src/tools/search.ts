@@ -17,6 +17,7 @@ import {
 	pathExists,
 	resolvePath,
 	run,
+	splitGlobEntry,
 	splitPathList,
 	statOrNull,
 } from "../shared/util.ts";
@@ -46,16 +47,13 @@ interface FileMatches {
 
 interface SearchTarget {
 	root: string;
+	glob?: string;
 	ranges?: Array<{ start: number; end: number }>;
 }
 
-async function parseTargets(
-	rawPath: string | undefined,
-	cwd: string,
-): Promise<{ targets: SearchTarget[]; globs: string[] }> {
+async function parseTargets(rawPath: string | undefined, cwd: string): Promise<SearchTarget[]> {
 	const entries = splitPathList(rawPath ?? ".");
 	const targets: SearchTarget[] = [];
-	const globs: string[] = [];
 	for (const entry of entries) {
 		const abs = resolvePath(entry, cwd);
 		if (await pathExists(abs)) {
@@ -85,21 +83,24 @@ async function parseTargets(
 				continue;
 			}
 		}
-		// Glob: hand to rg as a -g filter rooted at the workspace root.
-		if (/[*?[{]/.test(entry)) {
-			targets.push({ root: resolvePath(".", cwd), ranges: undefined });
-			globs.push(entry);
+		// Glob: anchor at its static base dir so absolute/~ globs match rg's
+		// relative printed paths.
+		const split = splitGlobEntry(entry, cwd);
+		if (split) {
+			if (!(await statOrNull(split.base))?.isDirectory()) {
+				throw new ToolError(`Glob base directory not found: ${split.base} (from ${entry})`);
+			}
+			targets.push({ root: split.base, glob: split.glob });
 			continue;
 		}
 		throw new ToolError(`Search root not found: ${entry}`);
 	}
-	return { targets, globs };
+	return targets;
 }
 
 async function ripgrepSearch(
 	params: SearchParams,
 	targets: SearchTarget[],
-	globs: string[],
 	cwd: string,
 	signal: AbortSignal | undefined,
 ): Promise<Map<string, FileMatches>> {
@@ -111,23 +112,29 @@ async function ripgrepSearch(
 	baseArgs.push("--hidden", "-g", "!.git");
 	if (params.multiline || /\\n|\n/.test(params.pattern)) baseArgs.push("--multiline", "--multiline-dotall");
 	if (params.context && params.context > 0) baseArgs.push("-C", String(Math.min(params.context, 10)));
-	for (const glob of globs) baseArgs.push("-g", glob);
 	baseArgs.push("--max-count", String(SINGLE_FILE_MATCHES), "--max-filesize", "16M");
 
 	// rg -g globs match the path as printed: scan directory roots with
-	// cwd=root (relative output), pass file roots as absolute positionals.
-	const runs: Array<{ cwd: string; positional: string[]; base: string }> = [];
-	const uniqueRoots = [...new Set(targets.map(target => target.root))];
-	for (const root of uniqueRoots) {
+	// cwd=root (relative output) and per-root -g filters; file roots become
+	// absolute positionals.
+	const runs: Array<{ cwd: string; positional: string[]; base: string; extraArgs: string[] }> = [];
+	const byRoot = new Map<string, string[]>();
+	for (const target of targets) {
+		const existing = byRoot.get(target.root);
+		if (target.glob) byRoot.set(target.root, [...(existing ?? []), target.glob]);
+		else if (!existing) byRoot.set(target.root, []);
+	}
+	for (const [root, rootGlobs] of byRoot) {
 		const stat = await statOrNull(root);
-		if (stat?.isDirectory()) runs.push({ cwd: root, positional: ["."], base: root });
-		else runs.push({ cwd, positional: [root], base: "" });
+		const extraArgs = rootGlobs.flatMap(glob => ["-g", glob]);
+		if (stat?.isDirectory()) runs.push({ cwd: root, positional: ["."], base: root, extraArgs });
+		else runs.push({ cwd, positional: [root], base: "", extraArgs: [] });
 	}
 
 	let stdout = "";
 	let sawError = "";
 	for (const invocation of runs) {
-		const result = await run("rg", [...baseArgs, ...invocation.positional], {
+		const result = await run("rg", [...baseArgs, ...invocation.extraArgs, ...invocation.positional], {
 			cwd: invocation.cwd,
 			signal,
 			timeoutMs: 30_000,
@@ -232,10 +239,10 @@ async function jsFallbackSearch(
 
 export async function executeSearch(params: SearchParams, ctx?: ToolCtx, signal?: AbortSignal): Promise<ToolResult> {
 	const cwd = ctx?.cwd ?? process.cwd();
-	const { targets, globs } = await parseTargets(params.path, cwd);
+	const targets = await parseTargets(params.path, cwd);
 
 	const files = (await hasBinary("rg"))
-		? await ripgrepSearch(params, targets, globs, cwd, signal)
+		? await ripgrepSearch(params, targets, cwd, signal)
 		: await jsFallbackSearch(params, targets, cwd);
 
 	// Line-range filters from single-file selectors.

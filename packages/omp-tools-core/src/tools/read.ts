@@ -413,14 +413,38 @@ function htmlToText(html: string): string {
 	return titleMatch ? `# ${titleMatch[1]?.trim()}\n\n${text}` : text;
 }
 
-async function readUrl(rawUrl: string, limit: number, signal?: AbortSignal): Promise<ToolResult> {
-	let url = rawUrl;
-	let selector: TextSelector | null = null;
-	const selectorMatch = /^(.*?):((?:raw)(?::[\d+,\-]+)?|[\d]+(?:[+\-,][\d,+\-]*)?(?::raw)?)$/.exec(rawUrl);
-	if (selectorMatch && /^https?:\/\/.+[^/]$/.test(selectorMatch[1] as string) && (selectorMatch[1] as string).includes("/", 8)) {
-		url = selectorMatch[1] as string;
-		selector = parseTextSelectors((selectorMatch[2] as string).split(":"));
+/**
+ * Split a trailing `:raw` / `:ranges` selector off a URL. Handles bare
+ * domains (`https://example.com:raw`), trailing slashes
+ * (`https://example.com/:raw`), and paths (`https://x.com/p:10-20`).
+ * A purely numeric tail on a path-less URL stays a port
+ * (`https://host:8080`); add a trailing slash to disambiguate
+ * (`https://host:8080/:50` selects lines).
+ */
+export function parseUrlTarget(rawUrl: string): { url: string; selector: TextSelector | null } {
+	const selectorMatch = /^(.*):((?:raw)(?::[\d+,\-]+)?|[\d]+(?:[+\-,][\d,+\-]*)?(?::raw)?)$/.exec(rawUrl);
+	if (!selectorMatch) return { url: rawUrl, selector: null };
+	const prefix = selectorMatch[1] as string;
+	const tail = selectorMatch[2] as string;
+	let parsed: URL;
+	try {
+		parsed = new URL(prefix);
+	} catch {
+		return { url: rawUrl, selector: null };
 	}
+	// `https://host:8080` — a purely numeric tail with no path is a port.
+	if (/^\d+$/.test(tail) && parsed.pathname === "/" && !prefix.endsWith("/")) {
+		return { url: rawUrl, selector: null };
+	}
+	const selector = parseTextSelectors(tail.split(":"));
+	if (!selector) return { url: rawUrl, selector: null };
+	return { url: prefix, selector };
+}
+
+async function readUrl(rawUrl: string, limit: number, signal?: AbortSignal): Promise<ToolResult> {
+	const target = parseUrlTarget(rawUrl);
+	const url = target.url;
+	const selector = target.selector;
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 30_000);
 	signal?.addEventListener("abort", () => controller.abort());

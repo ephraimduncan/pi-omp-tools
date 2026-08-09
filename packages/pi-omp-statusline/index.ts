@@ -1,22 +1,28 @@
 /**
- * pi-omp-statusline: oh-my-pi's status line for pi / prime-agent (in-process).
+ * pi-omp-statusline: oh-my-pi's input chrome for pi / prime-agent (in-process).
  *
- * Replicates omp's default footer preset — left: π · model+thinking · path ·
- * git (branch *unstaged +staged ?untracked) · context% · cost; right: session
- * name — with omp's exact segment colors (statusLine* values from omp's
- * dark theme). Toggle with /statusline.
+ * Clones omp's signature input area:
+ *  - the editor is a full rounded box (omp style), not a bare top rule
+ *  - the status line renders INSIDE the editor's top border, exactly like
+ *    omp's setTopBorderProvider wiring: π · model+thinking · path · git
+ *    (*unstaged +staged ?untracked) · context% · cost, gap-filled with
+ *    border-colored ─, session name in the right group
+ *  - the bottom footer is emptied (omp has no bottom bar)
+ *  - the working indicator uses omp's braille status spinner
  *
- * Note: footers are render functions; they only apply where the TUI runs in
- * the same process as extensions (pi, or prime via the prime-omp launcher).
+ * Prime's startup logo/header is intentionally left untouched.
+ * Toggle everything with /omp. In-process hosts only (pi, prime launcher).
  */
 import { execFile } from "node:child_process";
 import * as os from "node:os";
+// Host-provided virtual modules (pi and prime both alias these for extensions).
+// @ts-ignore -- resolved by the host's extension loader, not at compile time
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // biome-ignore lint/suspicious/noExplicitAny: host surfaces are structurally typed
 type Any = any;
 
-/* omp dark statusLine palette (packages/coding-agent/src/modes/theme/dark.json) */
-const BG = { r: 18, g: 18, b: 18 }; // #121212
+/* omp dark statusLine palette (oh-my-pi theme/dark.json) */
 const FG_MODEL = "\x1b[38;2;215;135;175m"; // #d787af
 const FG_PATH = "\x1b[38;2;0;175;175m"; // #00afaf
 const FG_GIT_CLEAN = "\x1b[38;2;95;175;95m"; // #5faf5f
@@ -31,9 +37,10 @@ const FG_ACCENT = "\x1b[38;2;254;188;56m"; // #febc38
 const FG_WARN = "\x1b[38;2;228;192;15m";
 const FG_ERR = "\x1b[38;2;252;58;75m";
 const RESET_FG = "\x1b[39m";
-const BG_ON = `\x1b[48;2;${BG.r};${BG.g};${BG.b}m`;
-const BG_OFF = "\x1b[49m";
 const SEP = `${FG_SEP} ┆ ${RESET_FG}`;
+
+/** omp's braille "status" spinner frames (theme/symbols.ts). */
+const OMP_SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 const THINKING_GLYPHS: Record<string, string> = {
 	off: "⦸ off",
@@ -52,35 +59,10 @@ interface GitInfo {
 	untracked: number;
 }
 
-function visibleWidthOf(text: string): number {
-	// strip SGR sequences; assume single-width glyphs (footer content is curated)
-	return text.replace(/\x1b\[[0-9;]*m/g, "").length;
-}
-
-function truncateVisible(text: string, max: number): string {
-	let width = 0;
-	let out = "";
-	for (let i = 0; i < text.length; ) {
-		if (text[i] === "\x1b") {
-			const end = text.indexOf("m", i);
-			if (end === -1) break;
-			out += text.slice(i, end + 1);
-			i = end + 1;
-			continue;
-		}
-		if (width >= max) break;
-		out += text[i];
-		width++;
-		i++;
-	}
-	return out;
-}
-
 function abbreviatePath(cwd: string, maxLength = 40): string {
 	let display = cwd.startsWith(os.homedir()) ? `~${cwd.slice(os.homedir().length)}` : cwd;
 	if (display.length <= maxLength) return display;
 	const parts = display.split("/");
-	// fish-style: abbreviate all but the last two segments to one char
 	const kept = parts.slice(-2);
 	const head = parts.slice(0, -2).map(part => (part.length > 1 ? part[0] : part));
 	display = [...head, ...kept].join("/");
@@ -88,161 +70,190 @@ function abbreviatePath(cwd: string, maxLength = 40): string {
 	return display;
 }
 
-export default function ompStatusline(pi: Any): void {
+export default function ompChrome(pi: Any): void {
 	let enabled = true;
 	let git: GitInfo = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
 
 	const refreshGit = (cwd: string, onDone?: () => void): void => {
-		execFile(
-			"git",
-			["status", "--porcelain=v1", "--branch"],
-			{ cwd, timeout: 3000 },
-			(error, stdout) => {
-				if (error) {
-					git = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
-					onDone?.();
-					return;
-				}
-				const lines = stdout.split("\n").filter(Boolean);
-				const info: GitInfo = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
-				for (const line of lines) {
-					if (line.startsWith("## ")) {
-						info.branch = line.slice(3).split("...")[0] ?? null;
-						continue;
-					}
-					const x = line[0] ?? " ";
-					const y = line[1] ?? " ";
-					if (x === "?" ) info.untracked++;
-					else {
-						if (x !== " ") info.staged++;
-						if (y !== " ") info.unstaged++;
-					}
-				}
-				git = info;
+		execFile("git", ["status", "--porcelain=v1", "--branch"], { cwd, timeout: 3000 }, (error, stdout) => {
+			if (error) {
+				git = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
 				onDone?.();
-			},
-		);
-	};
-
-	const installFooter = (ctx: Any): void => {
-		ctx.ui.setFooter((tui: Any, _theme: Any, footerData: Any) => {
-			const unsubscribe = footerData?.onBranchChange?.(() => {
-				refreshGit(ctx.cwd ?? process.cwd(), () => tui.requestRender());
-			});
-			refreshGit(ctx.cwd ?? process.cwd(), () => tui.requestRender());
-			if (gitTimer) clearInterval(gitTimer);
-			gitTimer = setInterval(() => refreshGit(ctx.cwd ?? process.cwd(), () => tui.requestRender()), 5000);
-
-			return {
-				dispose() {
-					unsubscribe?.();
-					if (gitTimer) clearInterval(gitTimer);
-					gitTimer = undefined;
-				},
-				invalidate() {},
-				render(width: number): string[] {
-					const segments: string[] = [];
-
-					// π
-					segments.push(`${FG_ACCENT}π${RESET_FG}`);
-
-					// model + thinking
-					const model = ctx.model;
-					let modelName: string = model?.name ?? model?.id ?? "no-model";
-					if (modelName.startsWith("Claude ")) modelName = modelName.slice(7);
-					let thinking = "";
-					const level: string | undefined = ctx.thinkingLevel;
-					if (model?.reasoning !== false && level) {
-						thinking = ` ${THINKING_GLYPHS[level] ?? level}`;
-					}
-					segments.push(`${FG_MODEL}${modelName}${thinking}${RESET_FG}`);
-
-					// path
-					segments.push(`${FG_PATH}${abbreviatePath(ctx.cwd ?? process.cwd())}${RESET_FG}`);
-
-					// git
-					if (git.branch) {
-						const dirty = git.staged > 0 || git.unstaged > 0 || git.untracked > 0;
-						const branchColor = dirty ? FG_GIT_DIRTY : FG_GIT_CLEAN;
-						const indicators: string[] = [];
-						if (git.unstaged > 0) indicators.push(`${FG_UNSTAGED}*${git.unstaged}${RESET_FG}`);
-						if (git.staged > 0) indicators.push(`${FG_STAGED}+${git.staged}${RESET_FG}`);
-						if (git.untracked > 0) indicators.push(`${FG_UNTRACKED}?${git.untracked}${RESET_FG}`);
-						segments.push(
-							`${branchColor}⑂ ${git.branch}${RESET_FG}${indicators.length ? ` ${indicators.join(" ")}` : ""}`,
-						);
-					}
-
-					// context %
-					const usage = ctx.getContextUsage?.();
-					if (usage) {
-						const window = usage.contextWindow ?? ctx.model?.contextWindow;
-						const pct =
-							typeof usage.percent === "number"
-								? usage.percent
-								: window
-									? (usage.tokens / window) * 100
-									: undefined;
-						if (pct !== undefined) {
-							const color = pct >= 90 ? FG_ERR : pct >= 70 ? FG_WARN : FG_CONTEXT;
-							segments.push(`${color}◫ ${pct.toFixed(0)}%${RESET_FG}`);
-						}
-					}
-
-					// cost
-					let cost = 0;
-					try {
-						for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
-							if (entry.type === "message" && entry.message?.role === "assistant") {
-								cost += entry.message.usage?.cost?.total ?? 0;
-							}
-						}
-					} catch {
-						/* session shapes vary */
-					}
-					if (cost > 0) segments.push(`${FG_COST}$${cost.toFixed(2)}${RESET_FG}`);
-
-					const left = ` ${segments.join(SEP)}`;
-					const sessionName: string = ctx.sessionManager?.getSessionName?.() ?? "";
-					const right = sessionName ? `${FG_ACCENT}${sessionName}${RESET_FG} ` : "";
-
-					const leftWidth = visibleWidthOf(left);
-					const rightWidth = visibleWidthOf(right);
-					let line: string;
-					if (leftWidth + rightWidth + 1 <= width) {
-						line = left + " ".repeat(width - leftWidth - rightWidth) + right;
-					} else {
-						line = `${truncateVisible(left, Math.max(0, width - 1))} `;
-						const lineWidth = visibleWidthOf(line);
-						if (lineWidth < width) line += " ".repeat(width - lineWidth);
-					}
-					return [`${BG_ON}${line}${RESET_FG}${BG_OFF}`];
-				},
-			};
+				return;
+			}
+			const info: GitInfo = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
+			for (const line of stdout.split("\n")) {
+				if (!line) continue;
+				if (line.startsWith("## ")) {
+					info.branch = line.slice(3).split("...")[0] ?? null;
+					continue;
+				}
+				const x = line[0] ?? " ";
+				const y = line[1] ?? " ";
+				if (x === "?") info.untracked++;
+				else {
+					if (x !== " ") info.staged++;
+					if (y !== " ") info.unstaged++;
+				}
+			}
+			git = info;
+			onDone?.();
 		});
 	};
 
-	pi.on?.("session_start", async (_event: Any, ctx: Any) => {
-		if (enabled && ctx.hasUI !== false && typeof ctx.ui?.setFooter === "function") {
-			try {
-				installFooter(ctx);
-			} catch {
-				/* host without footer API */
+	/** Left status group, omp segment order: π · model+thinking · path · git · ◫% · $ */
+	const buildLeftStatus = (ctx: Any): string => {
+		const segments: string[] = [];
+		segments.push(`${FG_ACCENT}π${RESET_FG}`);
+
+		const model = ctx.model;
+		let modelName: string = model?.name ?? model?.id ?? "no-model";
+		if (modelName.startsWith("Claude ")) modelName = modelName.slice(7);
+		let thinking = "";
+		const level: string | undefined = ctx.thinkingLevel;
+		if (level && model?.reasoning !== false) thinking = ` ${THINKING_GLYPHS[level] ?? level}`;
+		segments.push(`${FG_MODEL}${modelName}${thinking}${RESET_FG}`);
+
+		segments.push(`${FG_PATH}${abbreviatePath(ctx.cwd ?? process.cwd())}${RESET_FG}`);
+
+		if (git.branch) {
+			const dirty = git.staged > 0 || git.unstaged > 0 || git.untracked > 0;
+			const branchColor = dirty ? FG_GIT_DIRTY : FG_GIT_CLEAN;
+			const indicators: string[] = [];
+			if (git.unstaged > 0) indicators.push(`${FG_UNSTAGED}*${git.unstaged}${RESET_FG}`);
+			if (git.staged > 0) indicators.push(`${FG_STAGED}+${git.staged}${RESET_FG}`);
+			if (git.untracked > 0) indicators.push(`${FG_UNTRACKED}?${git.untracked}${RESET_FG}`);
+			segments.push(`${branchColor}⑂ ${git.branch}${RESET_FG}${indicators.length ? ` ${indicators.join(" ")}` : ""}`);
+		}
+
+		const usage = ctx.getContextUsage?.();
+		if (usage) {
+			const window = usage.contextWindow ?? ctx.model?.contextWindow;
+			const pct =
+				typeof usage.percent === "number" ? usage.percent : window ? (usage.tokens / window) * 100 : undefined;
+			if (pct !== undefined) {
+				const color = pct >= 90 ? FG_ERR : pct >= 70 ? FG_WARN : FG_CONTEXT;
+				segments.push(`${color}◫ ${pct.toFixed(0)}%${RESET_FG}`);
 			}
+		}
+
+		let cost = 0;
+		try {
+			for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
+				if (entry.type === "message" && entry.message?.role === "assistant") {
+					cost += entry.message.usage?.cost?.total ?? 0;
+				}
+			}
+		} catch {
+			/* session shapes vary */
+		}
+		if (cost > 0) segments.push(`${FG_COST}$${cost.toFixed(2)}${RESET_FG}`);
+
+		return segments.join(SEP);
+	};
+
+	const installChrome = async (ctx: Any): Promise<void> => {
+		// @ts-ignore -- host virtual module
+		const host = (await import("@earendil-works/pi-coding-agent")) as Any;
+		const BaseEditor = host.CustomEditor;
+		if (!BaseEditor) return;
+
+		refreshGit(ctx.cwd ?? process.cwd());
+		if (gitTimer) clearInterval(gitTimer);
+		gitTimer = setInterval(() => refreshGit(ctx.cwd ?? process.cwd()), 5000);
+
+		class OmpEditor extends BaseEditor {
+			// biome-ignore lint/suspicious/noExplicitAny: theme is host-typed
+			private ompTheme: Any;
+
+			constructor(tui: Any, theme: Any, keybindings: Any, options?: Any) {
+				super(tui, theme, keybindings, options);
+				this.ompTheme = theme;
+			}
+
+			render(width: number): string[] {
+				if (width < 24) return super.render(width) as string[];
+				const innerContent = width - 4; // "│ " … " │"
+				const base = super.render(innerContent) as string[];
+				if (base.length < 2) return base;
+
+				// The base editor frames content with a top and bottom rule; strip
+				// them and preserve any scroll indicators they carried.
+				const topRule = base[0] ?? "";
+				const bottomRule = base[base.length - 1] ?? "";
+				const body = base.slice(1, -1);
+				const scrollUp = /↑\s*(\d+)/.exec(topRule)?.[1];
+				const scrollDown = /↓\s*(\d+)/.exec(bottomRule)?.[1];
+
+				// bash-mode ("!"/"!!") tints the box border, like omp.
+				const firstLine = (this.getLines()[0] ?? "").trimStart();
+				const borderToken = firstLine.startsWith("!") ? "bashMode" : "borderMuted";
+				const border = (text: string): string => this.ompTheme.fg(borderToken, text);
+				const gapFill = (count: number): string =>
+					count > 0 ? this.ompTheme.fg("border", "─".repeat(count)) : "";
+
+				// Top border: ╭─ status ─── session ─╮  (status inside the border)
+				const budget = width - 4; // corners + one ─ each side
+				let left = ` ${buildLeftStatus(ctx)} `;
+				if (visibleWidth(left) > budget) left = truncateToWidth(left, budget, "…");
+				const sessionName: string = ctx.sessionManager?.getSessionName?.() ?? "";
+				let right = sessionName ? `${FG_ACCENT} ${sessionName} ${RESET_FG}` : "";
+				if (visibleWidth(left) + visibleWidth(right) > budget) right = "";
+				const gap = budget - visibleWidth(left) - visibleWidth(right);
+				const top = border("╭─") + left + gapFill(gap) + right + border("─╮");
+
+				// Body rows: │ content │
+				const rows = body.map(line => {
+					const pad = " ".repeat(Math.max(0, innerContent - visibleWidth(line)));
+					return `${border("│ ")}${line}${pad}${border(" │")}`;
+				});
+
+				// Bottom border, with preserved scroll hints: ╰─ ↑2 ↓3 ───╯
+				let hint = "";
+				if (scrollUp) hint += ` ↑${scrollUp}`;
+				if (scrollDown) hint += ` ↓${scrollDown}`;
+				if (hint) hint += " ";
+				const bottomGap = Math.max(0, width - 4 - visibleWidth(hint));
+				const bottom = border("╰─") + border(hint) + border("─".repeat(bottomGap)) + border("─╯");
+
+				return [top, ...rows, bottom];
+			}
+		}
+
+		ctx.ui.setEditorComponent((tui: Any, theme: Any, keybindings: Any) => new OmpEditor(tui, theme, keybindings));
+		// omp has no bottom bar — the status lives in the editor's top border.
+		ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));
+		ctx.ui.setWorkingIndicator?.({ frames: OMP_SPINNER });
+	};
+
+	const removeChrome = (ctx: Any): void => {
+		ctx.ui.setEditorComponent(undefined);
+		ctx.ui.setFooter(undefined);
+		ctx.ui.setWorkingIndicator?.();
+		if (gitTimer) clearInterval(gitTimer);
+		gitTimer = undefined;
+	};
+
+	pi.on?.("session_start", async (_event: Any, ctx: Any) => {
+		if (!enabled || ctx.hasUI === false) return;
+		try {
+			await installChrome(ctx);
+		} catch {
+			/* host without editor/footer APIs — leave defaults */
 		}
 	});
 
-	pi.registerCommand?.("statusline", {
-		description: "Toggle the omp-style status line footer",
+	pi.registerCommand?.("omp", {
+		description: "Toggle the omp input chrome (boxed editor with embedded status line)",
 		handler: async (_args: Any, ctx: Any) => {
 			enabled = !enabled;
 			if (enabled) {
-				installFooter(ctx);
-				ctx.ui.notify("omp status line enabled", "info");
+				await installChrome(ctx);
+				ctx.ui.notify("omp chrome enabled", "info");
 			} else {
-				ctx.ui.setFooter(undefined);
-				ctx.ui.notify("default footer restored", "info");
+				removeChrome(ctx);
+				ctx.ui.notify("default chrome restored", "info");
 			}
 		},
 	});

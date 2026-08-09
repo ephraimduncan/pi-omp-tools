@@ -1,7 +1,7 @@
 {
   "name": "@ephraimduncan/pi-omp-statusline",
   "version": "0.1.0",
-  "description": "oh-my-pi's powerline status line footer for pi / prime-agent (model, path, git, context, cost)",
+  "description": "oh-my-pi's input chrome for pi / prime-agent: boxed editor with the status line embedded in its top border, omp spinner, no bottom bar",
   "type": "module",
   "keywords": [
     "pi-package",

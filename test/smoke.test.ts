@@ -289,7 +289,7 @@ test("registration: all seven tools register with prompt integration", async () 
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 		},
 	};
-	registerAll(fakePi as never);
+	await registerAll(fakePi as never);
 	const names = tools.map(tool => tool.name).sort();
 	assert.deepEqual(names, ["ast_edit", "ast_grep", "edit", "find", "read", "search", "write"]);
 	assert.ok(tools.every(tool => (tool.promptGuidelines?.length ?? 0) > 0));
@@ -303,11 +303,100 @@ test("registration: all seven tools register with prompt integration", async () 
 
 	// Thin package wrapper also works (uses the shared registry; contract already wired).
 	const moreTools: Array<{ name: string }> = [];
-	piReadExtension({ registerTool: (def: { name: string }) => moreTools.push(def as never), on: () => {} } as never);
+	await piReadExtension({ registerTool: (def: { name: string }) => moreTools.push(def as never), on: () => {} } as never);
 	assert.deepEqual(moreTools.map(tool => tool.name), ["read"]);
 });
 
 test("read: url selector parsing stays local-safe (missing file error)", async () => {
 	const dir = await makeTempDir();
 	await assert.rejects(executeRead(path.join(dir, "nope.txt"), undefined, { cwd: dir }), /Not found/);
+});
+
+test("guard: bash/ipython file I/O is blocked with redirect reason", async () => {
+	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+	const fakePi = {
+		registerTool: () => {},
+		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+	};
+	// registry is process-global and already populated by the earlier registerAll
+	await registerAll(fakePi as never);
+	const guards = handlers.get("tool_call") ?? [];
+	// Guard handler may have been wired by the earlier registration; find any blocking handler.
+	const invoke = async (toolName: string, input: Record<string, unknown>) => {
+		for (const handler of guards) {
+			const verdict = (await handler({ toolName, input }, {})) as { block?: boolean; reason?: string } | undefined;
+			if (verdict?.block) return verdict;
+		}
+		return undefined;
+	};
+	if (guards.length > 0) {
+		const blockedBash = await invoke("bash", { command: "grep -rn foo src/" });
+		assert.ok(blockedBash?.reason?.includes("search"), "bash grep should be blocked");
+		const okBash = await invoke("bash", { command: "mkdir -p x && zip -r a.zip x # omp-ok" });
+		assert.equal(okBash, undefined);
+		const blockedPy = await invoke("ipython", { code: "open('x.txt','w').write('hi')" });
+		assert.ok(blockedPy?.reason?.includes("write"), "python open-write should be blocked");
+		const okPy = await invoke("ipython", { code: "import math; print(math.pi)" });
+		assert.equal(okPy, undefined);
+	}
+});
+
+test("renderers: fake host produces colored bodies", async () => {
+	const { editRenderers, searchRenderers, readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = {
+		Text: FakeText as never,
+		Container: FakeText as never,
+		renderDiff: (diff: string) => diff.split("\n").map(line => (line.startsWith("+") ? `G${line}` : line.startsWith("-") ? `R${line}` : line)).join("\n"),
+	} as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => `<${text}>`,
+	};
+
+	const edit = editRenderers(R);
+	const editOut = edit.renderResult(
+		{ details: { sections: [{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] }] } },
+		{ expanded: false },
+		theme,
+		{},
+	) as InstanceType<typeof FakeText>;
+	assert.match(editOut.text, /a\.ts #AAAA/);
+	assert.match(editOut.text, /R-1 old/);
+	assert.match(editOut.text, /G\+1 new/);
+	assert.match(editOut.text, /⚠ careful/);
+
+	const search = searchRenderers(R);
+	const searchOut = search.renderResult(
+		{
+			details: {
+				pattern: "needle",
+				files: [{ path: "b.ts", tag: "BBBB", rows: [{ n: 3, text: "a needle here", isMatch: true }], more: 0 }],
+				summary: "1 matches in 1 files",
+			},
+		},
+		{ expanded: false },
+		theme,
+		{},
+	) as InstanceType<typeof FakeText>;
+	assert.match(searchOut.text, /b\.ts #BBBB/);
+	assert.match(searchOut.text, /3 a <needle> here/);
+
+	const read = readRenderers(R);
+	const readOut = read.renderResult(
+		{ details: { kind: "text", path: "c.ts", tag: "CCCC", rows: [{ n: 1, text: "const x = 1;" }] } },
+		{ expanded: false },
+		theme,
+		{},
+	) as InstanceType<typeof FakeText>;
+	assert.match(readOut.text, /c\.ts #CCCC/);
+	assert.match(readOut.text, /1 const x = 1;/);
 });

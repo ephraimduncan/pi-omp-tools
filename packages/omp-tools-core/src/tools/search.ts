@@ -257,7 +257,11 @@ export async function executeSearch(params: SearchParams, ctx?: ToolCtx, signal?
 	const totalFiles = files.size;
 	const totalMatches = [...files.values()].reduce((sum, file) => sum + file.matchCount, 0);
 	if (totalFiles === 0) {
-		return textResult(`No matches for ${JSON.stringify(params.pattern)}.`);
+		return textResult(`No matches for ${JSON.stringify(params.pattern)}.`, {
+			pattern: params.pattern,
+			files: [],
+			summary: "no matches",
+		});
 	}
 
 	const skip = Math.max(0, params.skip ?? 0);
@@ -267,29 +271,40 @@ export async function executeSearch(params: SearchParams, ctx?: ToolCtx, signal?
 	const perFileCap = singleFile ? SINGLE_FILE_MATCHES : PER_FILE_MATCHES;
 
 	const out: string[] = [];
+	const fileDetails: Array<{
+		path: string;
+		tag?: string;
+		rows: Array<{ n: number; text: string; isMatch: boolean }>;
+		more: number;
+	}> = [];
 	for (const fileEntry of page) {
 		const shownPath = displayPath(fileEntry.file, cwd);
 		let header = `[${shownPath}]`;
+		let tag: string | undefined;
 		const stat = await statOrNull(fileEntry.file);
 		if (stat && stat.size <= TAG_MAX_BYTES) {
 			const buffer = await fs.readFile(fileEntry.file).catch(() => null);
 			if (buffer && !isProbablyBinary(buffer)) {
-				const tag = snapshots.record(fileEntry.file, normalizeText(buffer.toString("utf8")).text);
+				tag = snapshots.record(fileEntry.file, normalizeText(buffer.toString("utf8")).text);
 				header = `[${shownPath}#${tag}]`;
 			}
 		}
 		out.push(header);
+		const detail = { path: shownPath, tag, rows: [] as Array<{ n: number; text: string; isMatch: boolean }>, more: 0 };
+		fileDetails.push(detail);
 		const lineNumbers = [...fileEntry.lines.keys()].sort((a, b) => a - b);
 		let emittedMatches = 0;
 		let previousLine = 0;
 		for (const lineNumber of lineNumbers) {
 			const line = fileEntry.lines.get(lineNumber) as { text: string; isMatch: boolean };
 			if (line.isMatch && emittedMatches >= perFileCap) {
+				detail.more = fileEntry.matchCount - emittedMatches;
 				out.push(`… ${fileEntry.matchCount - emittedMatches} more matches in this file`);
 				break;
 			}
 			if (previousLine > 0 && lineNumber > previousLine + 1) out.push("…");
 			out.push(formatNumberedLine(lineNumber, line.text));
+			detail.rows.push({ n: lineNumber, text: line.text, isMatch: line.isMatch });
 			previousLine = lineNumber;
 			if (line.isMatch) emittedMatches++;
 		}
@@ -301,5 +316,11 @@ export async function executeSearch(params: SearchParams, ctx?: ToolCtx, signal?
 		summary.push(`showing files ${skip + 1}-${skip + page.length}; next: skip=${skip + page.length}`);
 	}
 	out.push(summary.join(" — "));
-	return textResult(capOutput(out.join("\n")).text);
+	return textResult(capOutput(out.join("\n")).text, {
+		pattern: params.pattern,
+		literal: params.literal === true,
+		caseSensitive: params.case === true,
+		files: fileDetails,
+		summary: summary.join(" — "),
+	});
 }

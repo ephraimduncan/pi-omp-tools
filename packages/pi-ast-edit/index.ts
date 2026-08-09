@@ -3,6 +3,6 @@
  */
 import { registerAstEdit, type PiApi } from "@ephraimduncan/omp-tools-core";
 
-export default function (pi: PiApi): void {
-	registerAstEdit(pi);
+export default async function (pi: PiApi): Promise<void> {
+	await registerAstEdit(pi);
 }

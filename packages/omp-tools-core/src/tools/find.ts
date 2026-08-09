@@ -114,11 +114,14 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 	if (total === 0) {
 		const scope = params.path ?? ".";
 		const hint = gitignore ? " (gitignored files excluded — retry with gitignore:false)" : "";
-		return textResult(`No paths match ${JSON.stringify(scope)}${hint}.`);
+		return textResult(`No paths match ${JSON.stringify(scope)}${hint}.`, { total: 0, paths: [] });
 	}
 
 	const shown = candidates.slice(0, limit);
 	const lines = shown.map(candidate => `${displayPath(candidate.abs, cwd)}${candidate.isDir ? "/" : ""}`);
 	const header = `${total} paths (newest first${total > limit ? `, showing ${limit}` : ""})`;
-	return textResult([header, ...lines].join("\n"));
+	return textResult([header, ...lines].join("\n"), {
+		total,
+		paths: shown.map(candidate => ({ path: displayPath(candidate.abs, cwd), isDir: candidate.isDir })),
+	});
 }

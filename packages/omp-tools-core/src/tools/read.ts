@@ -102,18 +102,33 @@ async function resolveTarget(raw: string, cwd: string): Promise<ResolvedTarget> 
 	return { abs: asIs, selectors: [], query };
 }
 
+export interface DisplayRow {
+	n: number;
+	text: string;
+}
+
+interface SelectedLines {
+	text: string;
+	rows: DisplayRow[];
+	moreLines: number;
+	totalLines: number;
+}
+
+const DETAIL_ROW_CAP = 400;
+
 function selectLines(
 	lines: string[],
 	selector: TextSelector | null,
 	limit: number,
 	shownPath: string,
 	tag: string | undefined,
-): string {
+): SelectedLines {
 	const total = lines.length;
 	const ranges: LineRange[] =
 		selector && selector.ranges.length > 0 ? selector.ranges : [{ start: 1, end: Number.POSITIVE_INFINITY }];
 
 	const out: string[] = [];
+	const rows: DisplayRow[] = [];
 	out.push(tag ? `[${shownPath}#${tag}]` : `[${shownPath}]`);
 	let emitted = 0;
 	let truncatedAt: number | null = null;
@@ -130,20 +145,24 @@ function selectLines(
 				break;
 			}
 			out.push(formatNumberedLine(line, lines[line - 1] as string));
+			if (rows.length < DETAIL_ROW_CAP) rows.push({ n: line, text: lines[line - 1] as string });
 			emitted++;
 		}
 		previousEnd = Math.max(previousEnd, end);
 		if (truncatedAt !== null) break;
 	}
 
+	let moreLines = 0;
 	if (truncatedAt !== null) {
+		moreLines = total - (truncatedAt - 1);
 		out.push(`… truncated at line ${truncatedAt - 1} of ${total} — continue with ${shownPath}:${truncatedAt}-`);
 	} else if (previousEnd < total && (selector?.ranges.length ?? 0) === 0) {
+		moreLines = total - previousEnd;
 		out.push(`… ${total - previousEnd} more lines — continue with ${shownPath}:${previousEnd + 1}-`);
 	} else if ((selector?.ranges.length ?? 0) > 0) {
 		out.push(`(${emitted} of ${total} lines)`);
 	}
-	return out.join("\n");
+	return { text: out.join("\n"), rows, moreLines, totalLines: total };
 }
 
 async function readDirectory(abs: string, shownPath: string): Promise<ToolResult> {
@@ -171,7 +190,7 @@ async function readDirectory(abs: string, shownPath: string): Promise<ToolResult
 		}
 	}
 	if (entries.length > cap) lines.push(`  … ${entries.length - cap} more entries`);
-	return textResult(lines.join("\n"));
+	return textResult(lines.join("\n"), { kind: "dir", body: lines.join("\n") });
 }
 
 function renderRows(rows: Row[], cap = 100): string[] {
@@ -203,7 +222,10 @@ async function readSqlite(
 	const customSql = query.get("q");
 	if (customSql) {
 		const rows = await driver.query(abs, assertReadonlySql(customSql));
-		return textResult([`${shownPath} ?q= — ${rows.length} rows`, ...renderRows(rows)].join("\n"));
+		{
+			const body = [`${shownPath} ?q= — ${rows.length} rows`, ...renderRows(rows)].join("\n");
+			return textResult(body, { kind: "sqlite", body });
+		}
 	}
 	if (selectors.length === 0) {
 		const tables = await driver.query(
@@ -223,7 +245,7 @@ async function readSqlite(
 			lines.push(`  ${name} (${table.type}, ${count} rows)`);
 		}
 		lines.push(`Next: ${shownPath}:<table> for schema+rows, :<table>:<key> by primary key, ?limit=/?where=/?q=SELECT…`);
-		return textResult(lines.join("\n"));
+		return textResult(lines.join("\n"), { kind: "sqlite", body: lines.join("\n") });
 	}
 
 	const table = assertSafeIdentifier(selectors[0] as string);
@@ -236,8 +258,14 @@ async function readSqlite(
 		const key = selectors.slice(1).join(":");
 		const pkColumn = String(schema.find(col => col.pk)?.name ?? "rowid");
 		const rows = await driver.query(abs, `SELECT * FROM "${table}" WHERE "${pkColumn}" = ? LIMIT 5`, [key]);
-		if (rows.length === 0) return textResult(`${shownPath}:${table}: no row with ${pkColumn}=${key}`);
-		return textResult([`${shownPath}:${table} ${pkColumn}=${key}`, ...renderRows(rows)].join("\n"));
+		if (rows.length === 0) {
+			const body = `${shownPath}:${table}: no row with ${pkColumn}=${key}`;
+			return textResult(body, { kind: "sqlite", body });
+		}
+		{
+			const body = [`${shownPath}:${table} ${pkColumn}=${key}`, ...renderRows(rows)].join("\n");
+			return textResult(body, { kind: "sqlite", body });
+		}
 	}
 
 	const where = query.get("where");
@@ -248,7 +276,7 @@ async function readSqlite(
 		`rows (limit ${limit}${where ? `, where ${where}` : ""}):`,
 		...renderRows(rows),
 	];
-	return textResult(lines.join("\n"));
+	return textResult(lines.join("\n"), { kind: "sqlite", body: lines.join("\n") });
 }
 
 function assertReadonlySqlFragment(fragment: string): string {
@@ -261,7 +289,10 @@ async function readZipArchive(abs: string, shownPath: string, member: string | u
 	if (!member) {
 		const listing = await run("unzip", ["-l", abs]);
 		if (listing.code !== 0) throw new ToolError(`unzip -l failed: ${listing.stderr.trim()}`);
-		return textResult(capOutput(`${shownPath}:\n${listing.stdout.trim()}\nRead a member with ${shownPath}:<member/path>`).text);
+		{
+			const body = capOutput(`${shownPath}:\n${listing.stdout.trim()}\nRead a member with ${shownPath}:<member/path>`).text;
+			return textResult(body, { kind: "archive", body });
+		}
 	}
 	const extraction = await run("unzip", ["-p", abs, member]);
 	if (extraction.code !== 0) {
@@ -274,7 +305,10 @@ async function readTarArchive(abs: string, shownPath: string, member: string | u
 	if (!member) {
 		const listing = await run("tar", ["-tvf", abs]);
 		if (listing.code !== 0) throw new ToolError(`tar -tvf failed: ${listing.stderr.trim()}`);
-		return textResult(capOutput(`${shownPath}:\n${listing.stdout.trim()}\nRead a member with ${shownPath}:<member/path>`).text);
+		{
+			const body = capOutput(`${shownPath}:\n${listing.stdout.trim()}\nRead a member with ${shownPath}:<member/path>`).text;
+			return textResult(body, { kind: "archive", body });
+		}
 	}
 	const extraction = await run("tar", ["-xOf", abs, member]);
 	if (extraction.code !== 0) {
@@ -288,8 +322,13 @@ function renderArchiveMember(shownPath: string, member: string, content: string,
 		throw new ToolError(`${shownPath}:${member} is binary (${content.length} bytes).`);
 	}
 	const lines = normalizeText(content).text.split("\n");
-	const body = selectLines(lines, null, limit, `${shownPath}:${member}`, undefined);
-	return textResult(`${body}\n(read-only archive member)`);
+	const selected = selectLines(lines, null, limit, `${shownPath}:${member}`, undefined);
+	return textResult(`${selected.text}\n(read-only archive member)`, {
+		kind: "text",
+		path: `${shownPath}:${member}`,
+		rows: selected.rows,
+		moreLines: selected.moreLines,
+	});
 }
 
 async function readPdf(abs: string, shownPath: string, selector: TextSelector | null, limit: number): Promise<ToolResult> {
@@ -299,7 +338,13 @@ async function readPdf(abs: string, shownPath: string, selector: TextSelector | 
 	const conversion = await run("pdftotext", ["-layout", abs, "-"]);
 	if (conversion.code !== 0) throw new ToolError(`pdftotext failed: ${conversion.stderr.trim()}`);
 	const lines = conversion.stdout.replace(/\f/g, "\n— page break —\n").split("\n");
-	return textResult(`${selectLines(lines, selector, limit, shownPath, undefined)}\n(read-only PDF extraction)`);
+	const selected = selectLines(lines, selector, limit, shownPath, undefined);
+	return textResult(`${selected.text}\n(read-only PDF extraction)`, {
+		kind: "text",
+		path: shownPath,
+		rows: selected.rows,
+		moreLines: selected.moreLines,
+	});
 }
 
 interface NotebookCell {
@@ -343,7 +388,7 @@ function renderNotebook(shownPath: string, rawJson: string, limit: number): Tool
 			break;
 		}
 	}
-	return textResult(capOutput(out.join("\n")).text);
+	return textResult(capOutput(out.join("\n")).text, { kind: "notebook", body: out.join("\n") });
 }
 
 function htmlToText(html: string): string {
@@ -402,9 +447,10 @@ async function readUrl(rawUrl: string, limit: number, signal?: AbortSignal): Pro
 		const capped = lines.slice(0, limit);
 		let output = capped.join("\n");
 		if (lines.length > limit) output += `\n… truncated (${lines.length} lines total; use ${url}:${limit + 1}- to continue)`;
-		return textResult(capOutput(`${url}\n${output}`).text);
+		return textResult(capOutput(`${url}\n${output}`).text, { kind: "url", path: url, body: output });
 	}
-	return textResult(capOutput(selectLines(lines, selector, limit, url, undefined)).text);
+	const selected = selectLines(lines, selector, limit, url, undefined);
+	return textResult(capOutput(selected.text).text, { kind: "text", path: url, rows: selected.rows, moreLines: selected.moreLines });
 }
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -496,12 +542,20 @@ export async function executeRead(
 				const end = Math.min(lines.length, range.end === Number.POSITIVE_INFINITY ? lines.length : range.end);
 				parts.push(lines.slice(range.start - 1, end).join("\n"));
 			}
-			return textResult(capOutput(parts.join("\n…\n")).text);
+			return textResult(capOutput(parts.join("\n…\n")).text, { kind: "raw", path: shownPath, body: parts.join("\n…\n") });
 		}
-		return textResult(capOutput(normalized.text).text);
+		return textResult(capOutput(normalized.text).text, { kind: "raw", path: shownPath, body: normalized.text });
 	}
 
 	const tag = snapshots.record(target.abs, normalized.text);
 	const lines = normalized.text.length === 0 ? [""] : normalized.text.replace(/\n$/, "").split("\n");
-	return textResult(capOutput(selectLines(lines, selector, limit, shownPath, tag)).text);
+	const selected = selectLines(lines, selector, limit, shownPath, tag);
+	return textResult(capOutput(selected.text).text, {
+		kind: "text",
+		path: shownPath,
+		tag,
+		rows: selected.rows,
+		moreLines: selected.moreLines,
+		totalLines: selected.totalLines,
+	});
 }

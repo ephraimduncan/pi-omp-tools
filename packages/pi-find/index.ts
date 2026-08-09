@@ -3,6 +3,6 @@
  */
 import { registerFind, type PiApi } from "@ephraimduncan/omp-tools-core";
 
-export default function (pi: PiApi): void {
-	registerFind(pi);
+export default async function (pi: PiApi): Promise<void> {
+	await registerFind(pi);
 }

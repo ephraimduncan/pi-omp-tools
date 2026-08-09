@@ -147,10 +147,18 @@ export async function executeWrite(rawPath: string, content: string, ctx?: ToolC
 
 	const normalized = normalizeText(content);
 	const tag = snapshots.record(abs, normalized.text);
-	const lineCount = normalized.text.length === 0 ? 0 : normalized.text.replace(/\n$/, "").split("\n").length;
+	const contentLines = normalized.text.length === 0 ? [] : normalized.text.replace(/\n$/, "").split("\n");
+	const lineCount = contentLines.length;
 	return textResult(
 		`[${shownPath}#${tag}] ${existed ? "overwrote" : "created"} — ${lineCount} lines, ${formatBytes(Buffer.byteLength(content))}${
 			content.startsWith("#!") ? " (made executable)" : ""
 		}`,
+		{
+			path: shownPath,
+			tag,
+			existed,
+			lineCount,
+			rows: contentLines.slice(0, 400).map((text, index) => ({ n: index + 1, text })),
+		},
 	);
 }

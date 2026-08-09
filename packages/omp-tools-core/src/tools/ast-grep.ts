@@ -38,7 +38,7 @@ export async function executeAstGrep(params: AstGrepParams, ctx?: ToolCtx, signa
 		if (outcome.filesSearched === 0) {
 			notes.push(`No parseable files in scope. Supported languages: ${availableLangSummary()}.`);
 		}
-		return textResult(notes.join("\n"));
+		return textResult(notes.join("\n"), { pat: params.pat, files: [], summary: notes[0] });
 	}
 
 	// Group by file.
@@ -53,20 +53,30 @@ export async function executeAstGrep(params: AstGrepParams, ctx?: ToolCtx, signa
 	const page = orderedFiles.slice(skip, skip + FILE_LIMIT);
 
 	const out: string[] = [];
+	const fileDetails: Array<{
+		path: string;
+		tag?: string;
+		rows: Array<{ n: number; text: string; isMatch: boolean }>;
+		more: number;
+	}> = [];
 	for (const file of page) {
 		const matches = byFile.get(file) as AstMatch[];
 		const shownPath = displayPath(file, cwd);
 		let header = `[${shownPath}]`;
+		let tag: string | undefined;
 		let fileLines: string[] | null = null;
 		try {
 			const raw = await fs.readFile(file, "utf8");
 			const normalized = normalizeText(raw).text;
-			header = `[${shownPath}#${snapshots.record(file, normalized)}]`;
+			tag = snapshots.record(file, normalized);
+			header = `[${shownPath}#${tag}]`;
 			fileLines = normalized.replace(/\n$/, "").split("\n");
 		} catch {
 			/* keep tag-less header */
 		}
 		out.push(header);
+		const detail = { path: shownPath, tag, rows: [] as Array<{ n: number; text: string; isMatch: boolean }>, more: 0 };
+		fileDetails.push(detail);
 		let previousEnd = 0;
 		for (const match of matches.slice(0, PER_FILE_MATCHES)) {
 			if (previousEnd > 0 && match.startLine > previousEnd + 1) out.push("…");
@@ -74,11 +84,15 @@ export async function executeAstGrep(params: AstGrepParams, ctx?: ToolCtx, signa
 			for (let line = Math.max(match.startLine, previousEnd + 1); line <= end; line++) {
 				const text = fileLines ? (fileLines[line - 1] ?? "") : (match.text.split("\n")[line - match.startLine] ?? "");
 				out.push(formatNumberedLine(line, text));
+				detail.rows.push({ n: line, text, isMatch: true });
 			}
 			if (end < match.endLine) out.push(`⋮ match continues to line ${match.endLine}`);
 			previousEnd = Math.max(previousEnd, end);
 		}
-		if (matches.length > PER_FILE_MATCHES) out.push(`… ${matches.length - PER_FILE_MATCHES} more matches in this file`);
+		if (matches.length > PER_FILE_MATCHES) {
+			detail.more = matches.length - PER_FILE_MATCHES;
+			out.push(`… ${matches.length - PER_FILE_MATCHES} more matches in this file`);
+		}
 		out.push("");
 	}
 
@@ -88,5 +102,9 @@ export async function executeAstGrep(params: AstGrepParams, ctx?: ToolCtx, signa
 	}
 	if (outcome.parseErrors.length > 0) summary.push(`${outcome.parseErrors.length} files failed to parse`);
 	out.push(summary.join(" — "));
-	return textResult(capOutput(out.join("\n")).text);
+	return textResult(capOutput(out.join("\n")).text, {
+		pat: params.pat,
+		files: fileDetails,
+		summary: summary.join(" — "),
+	});
 }

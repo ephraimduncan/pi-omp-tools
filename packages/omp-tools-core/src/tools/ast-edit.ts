@@ -4,10 +4,10 @@
  * `apply: true` to write.
  */
 import * as fs from "node:fs/promises";
-import { structuredPatch } from "diff";
 import { textResult, ToolError, type ToolCtx, type ToolResult } from "../host.ts";
 import { astRewrite } from "../shared/astengine.ts";
 import { collectFiles } from "../shared/files.ts";
+import { numberedDiff } from "../shared/numdiff.ts";
 import { snapshots } from "../shared/snapshots.ts";
 import { capOutput, denormalizeText, displayPath, normalizeText } from "../shared/util.ts";
 
@@ -20,13 +20,8 @@ export interface AstEditParams {
 const MAX_FILES = 50;
 const MAX_DIFF_LINES_PER_FILE = 60;
 
-function renderDiff(shownPath: string, before: string, after: string): string {
-	const patch = structuredPatch(shownPath, shownPath, before, after, "", "", { context: 2 });
-	const lines: string[] = [];
-	for (const hunk of patch.hunks) {
-		lines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
-		lines.push(...hunk.lines);
-	}
+function cappedDiff(before: string, after: string): string {
+	const lines = numberedDiff(before, after).split("\n");
 	if (lines.length > MAX_DIFF_LINES_PER_FILE) {
 		const shown = lines.slice(0, MAX_DIFF_LINES_PER_FILE);
 		shown.push(`… diff truncated (${lines.length} lines)`);
@@ -88,19 +83,28 @@ export async function executeAstEdit(params: AstEditParams, ctx?: ToolCtx, signa
 			: `PREVIEW — ${totalReplacements} replacement(s) in ${changes.length} file(s). No files written. Re-issue the same call with "apply": true to write.`,
 	);
 
+	const fileDetails: Array<{ path: string; tag?: string; count: number; diff: string }> = [];
 	for (const change of changes) {
 		const shownPath = displayPath(change.file, cwd);
+		const diff = cappedDiff(change.before, change.after);
+		let tag: string | undefined;
 		if (applying) {
 			await fs.writeFile(change.file, denormalizeText(change.after, change.encoding), "utf8");
-			const tag = snapshots.record(change.file, change.after);
+			tag = snapshots.record(change.file, change.after);
 			out.push(`\n[${shownPath}#${tag}] ${change.count} replacement(s)`);
 		} else {
 			out.push(`\n${shownPath} — ${change.count} replacement(s)`);
 		}
-		out.push(renderDiff(shownPath, change.before, change.after));
+		out.push(diff);
+		fileDetails.push({ path: shownPath, tag, count: change.count, diff });
 	}
 	if (parseErrors.length > 0) {
 		out.push(`\n${parseErrors.length} file(s) failed to parse: ${parseErrors.slice(0, 3).join("; ")}`);
 	}
-	return textResult(capOutput(out.join("\n")).text);
+	return textResult(capOutput(out.join("\n")).text, {
+		applied: applying,
+		totalReplacements,
+		files: fileDetails,
+		parseErrors: parseErrors.slice(0, 5),
+	});
 }

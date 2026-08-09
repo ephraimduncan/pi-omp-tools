@@ -11,6 +11,7 @@ import type { HashlineSection } from "../hashline/parser.ts";
 import { parsePatch } from "../hashline/parser.ts";
 import { buildPreview } from "../hashline/preview.ts";
 import { buildLineMap, remapOps } from "../hashline/recovery.ts";
+import { numberedDiff } from "../shared/numdiff.ts";
 import { computeFileTag, snapshots } from "../shared/snapshots.ts";
 import { denormalizeText, displayPath, normalizeText, pathExists, resolvePath } from "../shared/util.ts";
 
@@ -132,14 +133,30 @@ function noChangeMessage(shownPath: string): string {
 	);
 }
 
-async function commitSection(prepared: PreparedSection, cwd: string): Promise<string> {
+export interface SectionDetail {
+	path: string;
+	tag?: string;
+	op: "update" | "delete" | "noop";
+	diff?: string;
+	moveFrom?: string;
+	warnings: string[];
+	blockResolutions: BlockResolution[];
+}
+
+async function commitSection(
+	prepared: PreparedSection,
+	cwd: string,
+): Promise<{ text: string; detail: SectionDetail }> {
 	const parts: string[] = [];
 
 	if (prepared.section.remove) {
 		await fs.unlink(prepared.absPath);
 		snapshots.invalidate(prepared.absPath);
 		parts.push(`Deleted ${prepared.shownPath}`);
-		return parts.join("\n");
+		return {
+			text: parts.join("\n"),
+			detail: { path: prepared.shownPath, op: "delete", warnings: prepared.warnings, blockResolutions: [] },
+		};
 	}
 
 	const targetAbs = prepared.moveToAbs ?? prepared.absPath;
@@ -163,7 +180,18 @@ async function commitSection(prepared: PreparedSection, cwd: string): Promise<st
 	const preview = buildPreview(prepared.before, prepared.after);
 	if (preview) parts.push(preview);
 	if (prepared.warnings.length > 0) parts.push(`Warnings:\n${prepared.warnings.join("\n")}`);
-	return parts.join("\n");
+	return {
+		text: parts.join("\n"),
+		detail: {
+			path: shownTarget,
+			tag: newTag,
+			op: "update",
+			diff: numberedDiff(prepared.before, prepared.after),
+			moveFrom: prepared.moveToAbs && prepared.moveToAbs !== prepared.absPath ? prepared.shownPath : undefined,
+			warnings: prepared.warnings,
+			blockResolutions: prepared.blockResolutions,
+		},
+	};
 }
 
 export async function executeEdit(input: string, ctx?: ToolCtx): Promise<ToolResult> {
@@ -190,12 +218,17 @@ export async function executeEdit(input: string, ctx?: ToolCtx): Promise<ToolRes
 
 	const noops = prepared.filter(p => !p.section.remove && !p.moveToAbs && p.after === p.before);
 	if (noops.length === prepared.length && prepared.length > 0) {
-		return textResult(noops.map(p => noChangeMessage(p.shownPath)).join("\n\n"));
+		return textResult(noops.map(p => noChangeMessage(p.shownPath)).join("\n\n"), {
+			sections: noops.map(p => ({ path: p.shownPath, op: "noop", warnings: [], blockResolutions: [] })),
+		});
 	}
 
 	const responses: string[] = [];
+	const sectionDetails: SectionDetail[] = [];
 	for (const preparedSection of prepared) {
-		responses.push(await commitSection(preparedSection, cwd));
+		const committed = await commitSection(preparedSection, cwd);
+		responses.push(committed.text);
+		sectionDetails.push(committed.detail);
 	}
 
 	// Persist named registers captured this batch.
@@ -203,5 +236,5 @@ export async function executeEdit(input: string, ctx?: ToolCtx): Promise<ToolRes
 		if (name !== ANON_REGISTER) sessionRegisters.set(name, value);
 	}
 
-	return textResult(responses.join("\n\n"));
+	return textResult(responses.join("\n\n"), { sections: sectionDetails });
 }

@@ -25,6 +25,16 @@ import {
 	WRITE_DESCRIPTION,
 } from "./descriptions.ts";
 import type { PiApi } from "./host.ts";
+import {
+	astEditRenderers,
+	astGrepRenderers,
+	editRenderers,
+	findRenderers,
+	loadRenderSupport,
+	readRenderers,
+	searchRenderers,
+	writeRenderers,
+} from "./render.ts";
 import { executeAstEdit } from "./tools/ast-edit.ts";
 import { executeAstGrep } from "./tools/ast-grep.ts";
 import { executeEdit } from "./tools/edit.ts";
@@ -55,7 +65,7 @@ function buildContractBlock(): string {
 	if (names.length === 0) return "";
 	const lines: string[] = [
 		"## omp-tools",
-		"File and search work goes through these tools — NOT shell equivalents (cat/grep/sed/find/ls) and NOT python/ipython file I/O:",
+		"ALL file and search work goes through these tools. NEVER use bash/ipython for file operations: no cat/head/tail (use read), no grep/rg (use search), no find/ls for discovery (use find), no sed/awk/tee/heredoc rewrites or python open()/read_text()/write_text() (use edit/write). Such calls are blocked.",
 	];
 	for (const name of ["read", "write", "edit", "search", "find", "ast_grep", "ast_edit"]) {
 		if (registeredTools.has(name)) lines.push(`- ${TOOL_SUMMARIES[name]}`);
@@ -91,6 +101,54 @@ function ensurePromptContract(pi: PiApi): void {
 	pi.on("session_start", async () => {
 		retireOverlappingBuiltins(pi);
 	});
+
+	pi.on("tool_call", async (event: unknown) => {
+		const { toolName, input } = event as { toolName?: string; input?: Record<string, unknown> };
+		const verdict = guardFileOps(toolName, input);
+		if (verdict) return { block: true, reason: verdict };
+		return undefined;
+	});
+}
+
+const BASH_FILE_IO_RE =
+	/(?:^|&&|\|\||;)\s*(?:cat|head|tail|less|grep|rg|egrep|fgrep)\s+[^|<>]*$|(?:^|&&|\|\||;)\s*sed\s+(?:-[a-zA-Z]*\s+)*-i|(?:^|&&|\|\||;)\s*find\s+\S/m;
+const PY_FILE_IO_RE =
+	/open\s*\([^)]*["'][wax]\+?["']|\.write_text\s*\(|\.read_text\s*\(|open\s*\([^)]*\)\s*\.\s*read\s*\(|shutil\.copy|os\.remove\s*\(/;
+
+/**
+ * Redirect obvious file I/O in bash/ipython to the omp tools. Escape hatches:
+ * OMP_TOOLS_NO_GUARD=1 disables entirely; a literal `omp-ok` marker in the
+ * command/code allows a specific call through (for legitimate data work).
+ */
+function guardFileOps(toolName: string | undefined, input: Record<string, unknown> | undefined): string | null {
+	if (process.env.OMP_TOOLS_NO_GUARD === "1") return null;
+	if (!toolName || !input) return null;
+
+	if (toolName === "bash" && registeredTools.size > 0) {
+		const command = typeof input.command === "string" ? input.command : "";
+		if (!command || command.includes("omp-ok")) return null;
+		if (BASH_FILE_IO_RE.test(command)) {
+			return (
+				"omp-tools: use the dedicated tools instead of shell file I/O — read (cat/head/tail), " +
+				"search (grep/rg), find (find/ls), edit (sed -i). " +
+				"If this command is genuinely not file inspection/editing (e.g. fixture setup), re-run it with `# omp-ok` appended."
+			);
+		}
+		return null;
+	}
+
+	if (toolName === "ipython" && (registeredTools.has("read") || registeredTools.has("edit") || registeredTools.has("write"))) {
+		const code = typeof input.code === "string" ? input.code : "";
+		if (!code || code.includes("omp-ok")) return null;
+		if (PY_FILE_IO_RE.test(code)) {
+			return (
+				"omp-tools: use the dedicated tools instead of python file I/O — read (open/read_text), " +
+				"edit (targeted changes), write (open('w')/write_text). " +
+				"If this code is genuinely data processing rather than file viewing/editing, re-run it with `# omp-ok` in the code."
+			);
+		}
+	}
+	return null;
 }
 
 /**
@@ -121,10 +179,12 @@ function retireOverlappingBuiltins(pi: PiApi): void {
 	}
 }
 
-export function registerRead(pi: PiApi): void {
+export async function registerRead(pi: PiApi): Promise<void> {
 	registeredTools.add("read");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? readRenderers(support) : {}),
 		name: "read",
 		label: "Read",
 		description: READ_DESCRIPTION,
@@ -142,10 +202,12 @@ export function registerRead(pi: PiApi): void {
 	});
 }
 
-export function registerWrite(pi: PiApi): void {
+export async function registerWrite(pi: PiApi): Promise<void> {
 	registeredTools.add("write");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? writeRenderers(support) : {}),
 		name: "write",
 		label: "Write",
 		description: WRITE_DESCRIPTION,
@@ -163,10 +225,12 @@ export function registerWrite(pi: PiApi): void {
 	});
 }
 
-export function registerEdit(pi: PiApi): void {
+export async function registerEdit(pi: PiApi): Promise<void> {
 	registeredTools.add("edit");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? editRenderers(support) : {}),
 		name: "edit",
 		label: "Edit",
 		description: EDIT_DESCRIPTION,
@@ -183,10 +247,12 @@ export function registerEdit(pi: PiApi): void {
 	});
 }
 
-export function registerSearch(pi: PiApi): void {
+export async function registerSearch(pi: PiApi): Promise<void> {
 	registeredTools.add("search");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? searchRenderers(support) : {}),
 		name: "search",
 		label: "Search",
 		description: SEARCH_DESCRIPTION,
@@ -210,10 +276,12 @@ export function registerSearch(pi: PiApi): void {
 	});
 }
 
-export function registerFind(pi: PiApi): void {
+export async function registerFind(pi: PiApi): Promise<void> {
 	registeredTools.add("find");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? findRenderers(support) : {}),
 		name: "find",
 		label: "Find",
 		description: FIND_DESCRIPTION,
@@ -233,10 +301,12 @@ export function registerFind(pi: PiApi): void {
 	});
 }
 
-export function registerAstGrep(pi: PiApi): void {
+export async function registerAstGrep(pi: PiApi): Promise<void> {
 	registeredTools.add("ast_grep");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? astGrepRenderers(support) : {}),
 		name: "ast_grep",
 		label: "AST Grep",
 		description: AST_GREP_DESCRIPTION,
@@ -256,10 +326,12 @@ export function registerAstGrep(pi: PiApi): void {
 	});
 }
 
-export function registerAstEdit(pi: PiApi): void {
+export async function registerAstEdit(pi: PiApi): Promise<void> {
 	registeredTools.add("ast_edit");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? astEditRenderers(support) : {}),
 		name: "ast_edit",
 		label: "AST Edit",
 		description: AST_EDIT_DESCRIPTION,
@@ -284,12 +356,12 @@ export function registerAstEdit(pi: PiApi): void {
 	});
 }
 
-export function registerAll(pi: PiApi): void {
-	registerRead(pi);
-	registerWrite(pi);
-	registerEdit(pi);
-	registerSearch(pi);
-	registerFind(pi);
-	registerAstGrep(pi);
-	registerAstEdit(pi);
+export async function registerAll(pi: PiApi): Promise<void> {
+	await registerRead(pi);
+	await registerWrite(pi);
+	await registerEdit(pi);
+	await registerSearch(pi);
+	await registerFind(pi);
+	await registerAstGrep(pi);
+	await registerAstEdit(pi);
 }

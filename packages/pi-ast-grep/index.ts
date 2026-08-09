@@ -3,6 +3,6 @@
  */
 import { registerAstGrep, type PiApi } from "@ephraimduncan/omp-tools-core";
 
-export default function (pi: PiApi): void {
-	registerAstGrep(pi);
+export default async function (pi: PiApi): Promise<void> {
+	await registerAstGrep(pi);
 }

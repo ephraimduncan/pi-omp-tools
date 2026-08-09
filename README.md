@@ -59,6 +59,26 @@ Registering tools is not enough — models fall back to `bash`/`ipython` habits 
 2. **`before_agent_start`** — appends an `## omp-tools` workflow block describing the `read → edit` anchor loop for whichever tools are installed.
 3. **Built-in retirement** — on `session_start`, same-purpose built-ins (`grep`, `glob`, `rg`, `ls`) are deactivated when `search`/`find` are present. Same-name built-ins (`read`/`write`/`edit`) are replaced by registration. Opt out with `OMP_TOOLS_KEEP_BUILTINS=1`.
 
+## Rich UI in prime-agent: the `prime-omp` launcher
+
+Interactive prime-agent attaches its TUI to a **daemon-hosted** session; extension render
+functions cannot cross that RPC boundary, so custom tool UIs are dropped (only the `edit`
+tool stays rich, via built-in replay). The bundled launcher uses prime's public
+`main(args, { extensionFactories })` API to run the session **in-process**, where all
+seven tools render with the full custom UI (colored diffs, gutters, match highlighting):
+
+```bash
+# alias it once (adjust the clone path if you use a local checkout)
+alias primeo='node ~/.prime/agent/git/github.com/ephraimduncan/pi-omp-tools/bin/prime-omp.mjs'
+
+primeo                 # prime-agent, in-process, full omp-tools UI
+primeo -p "..."        # all normal flags pass through
+```
+
+Trade-offs vs plain `prime-agent`: the session lives in your terminal process (still saved
+and resumable, but not persistent in the background), no multi-client attach, no agents
+view. Plain `prime-agent` keeps working unchanged alongside it.
+
 ## The hashline edit loop
 
 ```

@@ -163,13 +163,15 @@ export default function ompChrome(pi: Any): void {
 		if (gitTimer) clearInterval(gitTimer);
 		gitTimer = setInterval(() => refreshGit(ctx.cwd ?? process.cwd()), 5000);
 
-		class OmpEditor extends BaseEditor {
-			// biome-ignore lint/suspicious/noExplicitAny: theme is host-typed
-			private ompTheme: Any;
+		/* omp box border colors (theme/dark.json): borderMuted / bashMode / border */
+		const BORDER_FG = "\x1b[38;2;61;66;74m"; // #3d424a
+		const BORDER_BASH_FG = "\x1b[38;2;0;136;250m"; // #0088fa
+		const BORDER_GAP_FG = "\x1b[38;2;23;143;185m"; // #178fb9
 
+		class OmpEditor extends BaseEditor {
+			// biome-ignore lint/complexity/noUselessConstructor: keeps typed ctor over `any` base
 			constructor(tui: Any, theme: Any, keybindings: Any, options?: Any) {
 				super(tui, theme, keybindings, options);
-				this.ompTheme = theme;
 			}
 
 			render(width: number): string[] {
@@ -188,10 +190,10 @@ export default function ompChrome(pi: Any): void {
 
 				// bash-mode ("!"/"!!") tints the box border, like omp.
 				const firstLine = (this.getLines()[0] ?? "").trimStart();
-				const borderToken = firstLine.startsWith("!") ? "bashMode" : "borderMuted";
-				const border = (text: string): string => this.ompTheme.fg(borderToken, text);
+				const borderFg = firstLine.startsWith("!") ? BORDER_BASH_FG : BORDER_FG;
+				const border = (text: string): string => `${borderFg}${text}${RESET_FG}`;
 				const gapFill = (count: number): string =>
-					count > 0 ? this.ompTheme.fg("border", "─".repeat(count)) : "";
+					count > 0 ? `${BORDER_GAP_FG}${"─".repeat(count)}${RESET_FG}` : "";
 
 				// Top border: ╭─ status ─── session ─╮  (status inside the border)
 				const budget = width - 4; // corners + one ─ each side

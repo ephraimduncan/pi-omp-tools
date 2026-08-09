@@ -69,10 +69,10 @@ seven tools render with the full custom UI (colored diffs, gutters, match highli
 
 ```bash
 # alias it once (adjust the clone path if you use a local checkout)
-alias primeo='node ~/.prime/agent/git/github.com/ephraimduncan/pi-omp-tools/bin/prime-omp.mjs'
+alias prime='node ~/.prime/agent/git/github.com/ephraimduncan/pi-omp-tools/bin/prime-omp.mjs'
 
-primeo                 # prime-agent, in-process, full omp-tools UI
-primeo -p "..."        # all normal flags pass through
+prime                  # prime-agent, in-process, full omp-tools UI
+prime -p "..."         # all normal flags pass through
 ```
 
 Trade-offs vs plain `prime-agent`: the session lives in your terminal process (still saved

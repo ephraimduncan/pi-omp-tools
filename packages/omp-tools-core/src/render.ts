@@ -170,8 +170,20 @@ interface Renderers {
 	renderResult: (result: Any, options: Any, theme: Any, context: Any) => Any;
 }
 
+/** omp's per-tool identity glyphs (theme/symbols.ts UNICODE_SYMBOLS). */
+const TOOL_GLYPHS: Record<string, string> = {
+	read: "▤",
+	write: "✎",
+	edit: "✎",
+	search: "⌕",
+	find: "⌕",
+	ast_grep: "⌕",
+	ast_edit: "✎",
+};
+
 function call(R: RenderSupport, theme: Any, name: string, rest: string): Any {
-	return new R.Text(`${fg(theme, "toolTitle", bold(theme, name))} ${rest}`, 0, 0);
+	const glyph = TOOL_GLYPHS[name] ? `${fg(theme, "dim", TOOL_GLYPHS[name] as string)} ` : "";
+	return new R.Text(`${glyph}${fg(theme, "toolTitle", bold(theme, name))} ${rest}`, 0, 0);
 }
 
 /* ------------------------------- read ---------------------------------- */

@@ -1,0 +1,34 @@
+{
+  "name": "@ephraimduncan/pi-omp-statusline",
+  "version": "0.1.0",
+  "description": "oh-my-pi's powerline status line footer for pi / prime-agent (model, path, git, context, cost)",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "statusline",
+    "footer"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-omp-statusline"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

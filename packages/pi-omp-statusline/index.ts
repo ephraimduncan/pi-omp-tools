@@ -261,8 +261,14 @@ export default function ompChrome(pi: Any): void {
 		firstTokenAt = 0;
 	});
 	pi.on?.("message_update", async (event: Any) => {
-		if (event?.message?.role !== "assistant") return;
-		if (firstTokenAt === 0) firstTokenAt = Date.now();
+		if (event?.message?.role !== "assistant" || firstTokenAt !== 0) return;
+		// TTFT counts from the first update that carries visible bytes, not the
+		// initial empty delta.
+		const content = event?.message?.content;
+		const hasBytes =
+			Array.isArray(content) &&
+			content.some((block: Any) => (block?.text?.length ?? 0) > 0 || (block?.thinking?.length ?? 0) > 0);
+		if (hasBytes) firstTokenAt = Date.now();
 	});
 	pi.on?.("message_end", async (event: Any) => {
 		const message = event?.message;

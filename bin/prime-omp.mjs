@@ -131,14 +131,14 @@ try {
 		AssistantMessageComponent.prototype.render = function (width) {
 			const lines = originalRender.call(this, width);
 			const message = this.lastMessage;
-			// Only completed, non-error assistant messages get a usage row.
+			// Only completed, non-error assistant messages get a usage row. The row
+			// is recomputed per render (cheap ring-buffer scan): usage totals and
+			// the timing-bridge entry can land shortly after stopReason appears.
 			const stop = message?.stopReason;
 			if (!message || (stop !== "stop" && stop !== "toolUse" && stop !== "length")) return lines;
-			if (this.__ompUsageRow === undefined) {
-				this.__ompUsageRow = buildUsageRow(message) ?? null;
-			}
-			if (!this.__ompUsageRow) return lines;
-			const dim = themeModule.theme?.fg ? themeModule.theme.fg("dim", this.__ompUsageRow) : this.__ompUsageRow;
+			const row = buildUsageRow(message);
+			if (!row) return lines;
+			const dim = themeModule.theme?.fg ? themeModule.theme.fg("dim", row) : row;
 			return [...lines, "", ` ${dim}`];
 		};
 	}

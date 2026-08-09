@@ -173,7 +173,19 @@ export default function ompChrome(pi: Any): void {
 			render(width: number): string[] {
 				if (width < 24) return super.render(width) as string[];
 				const innerContent = width - 4; // "│ " … " │"
-				const base = super.render(innerContent) as string[];
+				// omp's editor has no background surface — the box sits on the plain
+				// terminal bg. Prime assigns a userMessageBg surface to the editor
+				// (updateEditorBorderColor); clear it for the base render so we get
+				// the surface-less path (plain rows + rules, which we strip).
+				const editorState = this as Any;
+				const savedBackground = editorState.backgroundColor;
+				let base: string[];
+				try {
+					editorState.backgroundColor = undefined;
+					base = super.render(innerContent) as string[];
+				} finally {
+					editorState.backgroundColor = savedBackground;
+				}
 				if (base.length < 2) return base;
 
 				// The base editor frames content with a top and bottom rule; strip

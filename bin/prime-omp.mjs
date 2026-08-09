@@ -40,5 +40,26 @@ function findPrimeRoot() {
 const primeRoot = findPrimeRoot();
 const { main } = await import(pathToFileURL(path.join(primeRoot, "dist", "index.js")).href);
 
+// omp parity: hide the model/context tray line under the editor (omp has no
+// bottom bar; the omp chrome extension puts status in the editor's top
+// border). The tray still appears when subagents are active, since that is
+// functional information with no other surface. Best-effort: skipped if the
+// module shape changes.
+try {
+	const trayModule = await import(
+		pathToFileURL(path.join(primeRoot, "dist", "modes", "interactive", "components", "subagent-summary-line.js")).href
+	);
+	const SubagentSummaryLine = trayModule.SubagentSummaryLine;
+	if (SubagentSummaryLine?.prototype?.render) {
+		const originalRender = SubagentSummaryLine.prototype.render;
+		SubagentSummaryLine.prototype.render = function (width) {
+			if ((this.counts?.total ?? 0) === 0) return [];
+			return originalRender.call(this, width);
+		};
+	}
+} catch {
+	/* tray stays visible on unexpected prime versions */
+}
+
 // No-op factory: forces the in-process (non-daemon) interactive runtime.
 await main(process.argv.slice(2), { extensionFactories: [async () => {}] });

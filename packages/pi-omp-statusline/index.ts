@@ -243,6 +243,44 @@ export default function ompChrome(pi: Any): void {
 		gitTimer = undefined;
 	};
 
+	// ── usage-row timing bridge ────────────────────────────────────────────
+	// omp appends `time  ⤵ in  ⤴ out  💾 cache  ⏱ ttft  ⚡ tok/s` under every
+	// assistant message. Rendering happens via the prime-omp launcher's
+	// AssistantMessageComponent patch; the ⏱/⚡ numbers only exist as stream
+	// timing, recorded here and bridged through globalThis.
+	const TIMING_KEY = Symbol.for("omp-tools.usage-timings.v1");
+	const globalRegistry = globalThis as Record<PropertyKey, unknown>;
+	globalRegistry[TIMING_KEY] ??= [];
+	const timings = globalRegistry[TIMING_KEY] as Array<Record<string, number>>;
+	let messageStartedAt = 0;
+	let firstTokenAt = 0;
+
+	pi.on?.("message_start", async (event: Any) => {
+		if (event?.message?.role !== "assistant") return;
+		messageStartedAt = Date.now();
+		firstTokenAt = 0;
+	});
+	pi.on?.("message_update", async (event: Any) => {
+		if (event?.message?.role !== "assistant") return;
+		if (firstTokenAt === 0) firstTokenAt = Date.now();
+	});
+	pi.on?.("message_end", async (event: Any) => {
+		const message = event?.message;
+		if (message?.role !== "assistant" || !message.usage || messageStartedAt === 0) return;
+		const now = Date.now();
+		timings.push({
+			input: message.usage.input ?? 0,
+			output: message.usage.output ?? 0,
+			cacheRead: message.usage.cacheRead ?? 0,
+			cacheWrite: message.usage.cacheWrite ?? 0,
+			durationMs: now - messageStartedAt,
+			ttftMs: firstTokenAt > 0 ? firstTokenAt - messageStartedAt : 0,
+			at: now,
+		});
+		if (timings.length > 300) timings.splice(0, timings.length - 300);
+		messageStartedAt = 0;
+	});
+
 	pi.on?.("session_start", async (_event: Any, ctx: Any) => {
 		if (!enabled || ctx.hasUI === false) return;
 		try {

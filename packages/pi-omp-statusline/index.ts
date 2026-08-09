@@ -8,7 +8,6 @@
  *    (*unstaged +staged ?untracked) · context% · cost, gap-filled with
  *    border-colored ─, session name in the right group
  *  - the bottom footer is emptied (omp has no bottom bar)
- *  - the working indicator uses omp's braille status spinner
  *
  * Prime's startup logo/header is intentionally left untouched.
  * Toggle everything with /omp. In-process hosts only (pi, prime launcher).
@@ -38,9 +37,6 @@ const FG_WARN = "\x1b[38;2;228;192;15m";
 const FG_ERR = "\x1b[38;2;252;58;75m";
 const RESET_FG = "\x1b[39m";
 const SEP = `${FG_SEP} ┆ ${RESET_FG}`;
-
-/** omp's braille "status" spinner frames (theme/symbols.ts). */
-const OMP_SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 const THINKING_GLYPHS: Record<string, string> = {
 	off: "⦸ off",
@@ -226,13 +222,11 @@ export default function ompChrome(pi: Any): void {
 		ctx.ui.setEditorComponent((tui: Any, theme: Any, keybindings: Any) => new OmpEditor(tui, theme, keybindings));
 		// omp has no bottom bar — the status lives in the editor's top border.
 		ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));
-		ctx.ui.setWorkingIndicator?.({ frames: OMP_SPINNER });
 	};
 
 	const removeChrome = (ctx: Any): void => {
 		ctx.ui.setEditorComponent(undefined);
 		ctx.ui.setFooter(undefined);
-		ctx.ui.setWorkingIndicator?.();
 		if (gitTimer) clearInterval(gitTimer);
 		gitTimer = undefined;
 	};
@@ -243,6 +237,17 @@ export default function ompChrome(pi: Any): void {
 			await installChrome(ctx);
 		} catch {
 			/* host without editor/footer APIs — leave defaults */
+		}
+	});
+
+	// The TUI's footer slot may not exist yet when session_start fires during
+	// startup; re-assert the empty footer when the first agent turn begins.
+	pi.on?.("agent_start", async (_event: Any, ctx: Any) => {
+		if (!enabled || ctx.hasUI === false) return;
+		try {
+			ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));
+		} catch {
+			/* ignore */
 		}
 	});
 

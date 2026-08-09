@@ -1,0 +1,313 @@
+/**
+ * Smoke tests for all omp-tools tools, run with `node --test`.
+ */
+import * as assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { test } from "node:test";
+import {
+	executeAstEdit,
+	executeAstGrep,
+	executeEdit,
+	executeFind,
+	executeRead,
+	executeSearch,
+	executeWrite,
+	registerAll,
+} from "../packages/omp-tools-core/index.ts";
+import piReadExtension from "../packages/pi-read/index.ts";
+
+function text(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content
+		.filter(part => part.type === "text")
+		.map(part => part.text ?? "")
+		.join("\n");
+}
+
+async function makeTempDir(): Promise<string> {
+	return fs.mkdtemp(path.join(os.tmpdir(), "omp-tools-test-"));
+}
+
+function tagOf(output: string): string {
+	const match = /#([0-9A-F]{4})\]/.exec(output);
+	assert.ok(match, `expected a #TAG in output:\n${output}`);
+	return match[1] as string;
+}
+
+test("read: numbered lines with hashline tag", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "hello.txt");
+	await fs.writeFile(file, "alpha\nbeta\ngamma\n");
+	const result = await executeRead(file, undefined, { cwd: dir });
+	const output = text(result);
+	assert.match(output, /\[hello\.txt#[0-9A-F]{4}\]/);
+	assert.match(output, /1:alpha/);
+	assert.match(output, /3:gamma/);
+});
+
+test("read: range selectors and :raw", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "nums.txt");
+	await fs.writeFile(file, Array.from({ length: 50 }, (_, i) => `line-${i + 1}`).join("\n"));
+	const ranged = text(await executeRead(`${file}:10-12`, undefined, { cwd: dir }));
+	assert.match(ranged, /10:line-10/);
+	assert.match(ranged, /12:line-12/);
+	assert.ok(!ranged.includes("13:line-13"));
+	const multi = text(await executeRead(`${file}:2-3,40-41`, undefined, { cwd: dir }));
+	assert.match(multi, /2:line-2/);
+	assert.match(multi, /…/);
+	assert.match(multi, /40:line-40/);
+	const raw = text(await executeRead(`${file}:raw`, undefined, { cwd: dir }));
+	assert.ok(raw.includes("line-1\nline-2"));
+	assert.ok(!raw.includes("1:line-1"));
+});
+
+test("read: directory listing", async () => {
+	const dir = await makeTempDir();
+	await fs.mkdir(path.join(dir, "sub"));
+	await fs.writeFile(path.join(dir, "a.txt"), "hi");
+	const output = text(await executeRead(dir, undefined, { cwd: dir }));
+	assert.match(output, /sub\//);
+	assert.match(output, /a\.txt/);
+});
+
+test("write then edit: hashline replace, insert, cut", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "greet.py");
+	const written = text(await executeWrite(file, 'def greet(name):\n    msg = "Hello, " + name\n    print(msg)\ngreet("world")\n', { cwd: dir }));
+	const tag = tagOf(written);
+
+	const edited = text(
+		await executeEdit(
+			`[greet.py#${tag}]\nPUT 2.=3:\n+    print(f"Hi, {name}")\nPUT >4:\n+print("done")`,
+			{ cwd: dir },
+		),
+	);
+	assert.match(edited, /updated/);
+	const content = await fs.readFile(file, "utf8");
+	assert.equal(content, 'def greet(name):\n    print(f"Hi, {name}")\ngreet("world")\nprint("done")\n');
+	// Response carries the new tag + fresh numbers for chaining.
+	const newTag = tagOf(edited);
+	const cutResult = text(await executeEdit(`[greet.py#${newTag}]\nCUT 4.=4`, { cwd: dir }));
+	assert.match(cutResult, /updated/);
+	assert.equal(await fs.readFile(file, "utf8"), 'def greet(name):\n    print(f"Hi, {name}")\ngreet("world")\n');
+});
+
+test("edit: block op via tree-sitter, registers move code across files", async () => {
+	const dir = await makeTempDir();
+	const src = path.join(dir, "util.ts");
+	await fs.writeFile(src, "export function keep(): number {\n\treturn 1;\n}\nexport function move(): number {\n\treturn 2;\n}\n");
+	await fs.writeFile(path.join(dir, "other.ts"), "// target\n");
+	const readOut = text(await executeRead(src, undefined, { cwd: dir }));
+	const tag = tagOf(readOut);
+	const otherOut = text(await executeRead(path.join(dir, "other.ts"), undefined, { cwd: dir }));
+	const otherTag = tagOf(otherOut);
+
+	const patch = `[util.ts#${tag}]\nCUT 4* @fn\n[other.ts#${otherTag}]\nPUT >1 @fn`;
+	const result = text(await executeEdit(patch, { cwd: dir }));
+	assert.match(result, /block 4\* resolved to 4\.=6/);
+	assert.equal(await fs.readFile(src, "utf8"), "export function keep(): number {\n\treturn 1;\n}\n");
+	assert.equal(await fs.readFile(path.join(dir, "other.ts"), "utf8"), "// target\nexport function move(): number {\n\treturn 2;\n}\n");
+});
+
+test("edit: markdown heading block replace", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "doc.md");
+	await fs.writeFile(file, "# Title\n\n## One\nbody one\n\n## Two\nbody two\n");
+	const tag = tagOf(text(await executeRead(file, undefined, { cwd: dir })));
+	await executeEdit(`[doc.md#${tag}]\nPUT 3*:\n+## One\n+new body`, { cwd: dir });
+	const content = await fs.readFile(file, "utf8");
+	assert.match(content, /## One\nnew body\n\n## Two/);
+});
+
+test("edit: stale-anchor recovery after unrelated change", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "list.txt");
+	await fs.writeFile(file, "one\ntwo\nthree\nfour\nfive\n");
+	const tag = tagOf(text(await executeRead(file, undefined, { cwd: dir })));
+	// External change ABOVE the anchor: prepend a line (shifts everything down).
+	await fs.writeFile(file, "zero\none\ntwo\nthree\nfour\nfive\n");
+	const result = text(await executeEdit(`[list.txt#${tag}]\nPUT 4.=4:\n+FOUR`, { cwd: dir }));
+	assert.match(result, /Recovered stale anchors/);
+	assert.equal(await fs.readFile(file, "utf8"), "zero\none\ntwo\nthree\nFOUR\nfive\n");
+});
+
+test("edit: unknown tag is rejected with current tag hint", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "x.txt");
+	await fs.writeFile(file, "a\nb\n");
+	await assert.rejects(
+		executeEdit("[x.txt#0000]\nPUT 1.=1:\n+z", { cwd: dir }),
+		/Stale or unknown tag #0000/,
+	);
+});
+
+test("edit: overlap and empty PUT are rejected; noop is diagnosed", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "y.txt");
+	await fs.writeFile(file, "a\nb\nc\n");
+	const tag = tagOf(text(await executeRead(file, undefined, { cwd: dir })));
+	await assert.rejects(
+		executeEdit(`[y.txt#${tag}]\nPUT 1.=2:\n+x\nCUT 2.=3`, { cwd: dir }),
+		/Overlapping hunks/,
+	);
+	await assert.rejects(executeEdit(`[y.txt#${tag}]\nPUT 1.=1:`, { cwd: dir }), /no \+body rows/);
+	const noop = text(await executeEdit(`[y.txt#${tag}]\nPUT 2.=2:\n+b`, { cwd: dir }));
+	assert.match(noop, /produced no change/);
+});
+
+test("edit: REM deletes and MV renames", async () => {
+	const dir = await makeTempDir();
+	const a = path.join(dir, "a.txt");
+	await fs.writeFile(a, "hello\n");
+	const tag = tagOf(text(await executeRead(a, undefined, { cwd: dir })));
+	await executeEdit(`[a.txt#${tag}]\nPUT 1.=1:\n+hey\nMV b.txt`, { cwd: dir });
+	assert.equal(await fs.readFile(path.join(dir, "b.txt"), "utf8"), "hey\n");
+	const bTag = tagOf(text(await executeRead(path.join(dir, "b.txt"), undefined, { cwd: dir })));
+	const removed = text(await executeEdit(`[b.txt#${bTag}]\nREM`, { cwd: dir }));
+	assert.match(removed, /Deleted b\.txt/);
+	await assert.rejects(fs.access(path.join(dir, "b.txt")));
+});
+
+test("search: tagged grouped output", async () => {
+	const dir = await makeTempDir();
+	await fs.writeFile(path.join(dir, "one.ts"), "const needleX = 1;\n");
+	await fs.writeFile(path.join(dir, "two.ts"), "// no match here\nlet needleX = 2;\n");
+	const output = text(await executeSearch({ pattern: "needleX" }, { cwd: dir }));
+	assert.match(output, /\[one\.ts#[0-9A-F]{4}\]/);
+	assert.match(output, /1:const needleX = 1;/);
+	assert.match(output, /2:let needleX = 2;/);
+	assert.match(output, /2 matches in 2 files/);
+});
+
+test("find: glob lookup", async () => {
+	const dir = await makeTempDir();
+	await fs.mkdir(path.join(dir, "src"), { recursive: true });
+	await fs.writeFile(path.join(dir, "src", "a.ts"), "");
+	await fs.writeFile(path.join(dir, "src", "b.js"), "");
+	const output = text(await executeFind({ path: "src/**/*.ts", gitignore: false }, { cwd: dir }));
+	assert.match(output, /src\/a\.ts/);
+	assert.ok(!output.includes("b.js"));
+});
+
+test("ast_grep: typescript pattern with metavariables", async () => {
+	const dir = await makeTempDir();
+	await fs.writeFile(path.join(dir, "code.ts"), "console.log(1);\nconsole.warn(2);\nconsole.log(3);\n");
+	const output = text(await executeAstGrep({ pat: "console.log($A)" }, { cwd: dir }));
+	assert.match(output, /1:console\.log\(1\);/);
+	assert.match(output, /3:console\.log\(3\);/);
+	assert.ok(!output.includes("console.warn"));
+	assert.match(output, /2 matches/);
+});
+
+test("ast_grep: python via optional grammar (or graceful skip)", async () => {
+	const dir = await makeTempDir();
+	await fs.writeFile(path.join(dir, "app.py"), "print('a')\nx = compute(1)\nprint('b')\n");
+	const output = text(await executeAstGrep({ pat: "print($A)" }, { cwd: dir }));
+	// With @ast-grep/lang-python installed this matches; without it we get a
+	// "no parseable files" note. Both are acceptable shapes.
+	assert.ok(/2 matches/.test(output) || /No matches|No parseable/.test(output), output);
+});
+
+test("ast_edit: preview then apply", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "log.ts");
+	await fs.writeFile(file, "console.log(a);\nkeep();\nconsole.log(b);\n");
+	const preview = text(await executeAstEdit({ ops: [{ pat: "console.log($A)", out: "logger.info($A)" }], paths: [file] }, { cwd: dir }));
+	assert.match(preview, /PREVIEW/);
+	assert.match(preview, /logger\.info\(a\)/);
+	assert.equal(await fs.readFile(file, "utf8"), "console.log(a);\nkeep();\nconsole.log(b);\n");
+	const applied = text(
+		await executeAstEdit({ ops: [{ pat: "console.log($A)", out: "logger.info($A)" }], paths: [file], apply: true }, { cwd: dir }),
+	);
+	assert.match(applied, /APPLIED 2 replacement/);
+	assert.equal(await fs.readFile(file, "utf8"), "logger.info(a);\nkeep();\nlogger.info(b);\n");
+});
+
+test("sqlite: read tables, rows, and write rows", async () => {
+	const dir = await makeTempDir();
+	const db = path.join(dir, "data.sqlite");
+	const { DatabaseSync } = await import("node:sqlite");
+	const handle = new DatabaseSync(db);
+	handle.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO users (name) VALUES ('ada'), ('bob');");
+	handle.close();
+
+	const tables = text(await executeRead(db, undefined, { cwd: dir }));
+	assert.match(tables, /users \(table, 2 rows\)/);
+	const rows = text(await executeRead(`${db}:users`, undefined, { cwd: dir }));
+	assert.match(rows, /"name":"ada"/);
+	const byKey = text(await executeRead(`${db}:users:2`, undefined, { cwd: dir }));
+	assert.match(byKey, /"name":"bob"/);
+
+	const inserted = text(await executeWrite(`${db}:users`, '{"name":"eve"}', { cwd: dir }));
+	assert.match(inserted, /Inserted 1 row/);
+	const updated = text(await executeWrite(`${db}:users:3`, '{"name":"EVE"}', { cwd: dir }));
+	assert.match(updated, /Updated 1 row/);
+	const deleted = text(await executeWrite(`${db}:users:3`, "", { cwd: dir }));
+	assert.match(deleted, /Deleted 1 row/);
+});
+
+test("archives: zip list, member read, member write", async () => {
+	const dir = await makeTempDir();
+	await fs.mkdir(path.join(dir, "payload"));
+	await fs.writeFile(path.join(dir, "payload", "inner.txt"), "zipped content\nline two\n");
+	execFileSync("zip", ["-q", "-r", "bundle.zip", "payload"], { cwd: dir });
+
+	const listing = text(await executeRead(path.join(dir, "bundle.zip"), undefined, { cwd: dir }));
+	assert.match(listing, /payload\/inner\.txt/);
+	const member = text(await executeRead(path.join(dir, "bundle.zip") + ":payload/inner.txt", undefined, { cwd: dir }));
+	assert.match(member, /1:zipped content/);
+	const writeResult = text(await executeWrite(path.join(dir, "bundle.zip") + ":payload/new.txt", "fresh\n", { cwd: dir }));
+	assert.match(writeResult, /Wrote/);
+	const reread = text(await executeRead(path.join(dir, "bundle.zip") + ":payload/new.txt", undefined, { cwd: dir }));
+	assert.match(reread, /1:fresh/);
+});
+
+test("notebook rendering", async () => {
+	const dir = await makeTempDir();
+	const nb = {
+		cells: [
+			{ cell_type: "markdown", source: ["# Heading\n"], outputs: [] },
+			{ cell_type: "code", source: ["print(1)\n"], outputs: [{ output_type: "stream", text: ["1\n"] }] },
+		],
+	};
+	await fs.writeFile(path.join(dir, "nb.ipynb"), JSON.stringify(nb));
+	const output = text(await executeRead(path.join(dir, "nb.ipynb"), undefined, { cwd: dir }));
+	assert.match(output, /cell 1 \[markdown\]/);
+	assert.match(output, /print\(1\)/);
+	assert.match(output, /output: 1/);
+});
+
+test("registration: all seven tools register with prompt integration", async () => {
+	const tools: Array<{ name: string; promptGuidelines?: string[] }> = [];
+	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+	const fakePi = {
+		registerTool: (def: { name: string }) => tools.push(def as never),
+		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+	};
+	registerAll(fakePi as never);
+	const names = tools.map(tool => tool.name).sort();
+	assert.deepEqual(names, ["ast_edit", "ast_grep", "edit", "find", "read", "search", "write"]);
+	assert.ok(tools.every(tool => (tool.promptGuidelines?.length ?? 0) > 0));
+
+	const beforeAgentStart = handlers.get("before_agent_start");
+	assert.ok(beforeAgentStart && beforeAgentStart.length > 0, "before_agent_start handler registered");
+	const outcome = (await beforeAgentStart[0]?.({ systemPrompt: "BASE PROMPT" }, {})) as { systemPrompt: string };
+	assert.match(outcome.systemPrompt, /^BASE PROMPT/);
+	assert.match(outcome.systemPrompt, /## omp-tools/);
+	assert.match(outcome.systemPrompt, /Anchor loop/);
+
+	// Thin package wrapper also works (uses the shared registry; contract already wired).
+	const moreTools: Array<{ name: string }> = [];
+	piReadExtension({ registerTool: (def: { name: string }) => moreTools.push(def as never), on: () => {} } as never);
+	assert.deepEqual(moreTools.map(tool => tool.name), ["read"]);
+});
+
+test("read: url selector parsing stays local-safe (missing file error)", async () => {
+	const dir = await makeTempDir();
+	await assert.rejects(executeRead(path.join(dir, "nope.txt"), undefined, { cwd: dir }), /Not found/);
+});

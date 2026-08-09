@@ -1,0 +1,46 @@
+{
+  "name": "@ephraimduncan/omp-tools-core",
+  "version": "0.1.0",
+  "description": "Shared engine for the omp-tools pi extensions: hashline edit, unified read, ast-grep search/rewrite, ripgrep search, glob find",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": [
+    "pi",
+    "prime-agent",
+    "oh-my-pi",
+    "hashline",
+    "ast-grep"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/omp-tools-core"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ast-grep/napi": "^0.39.6",
+    "diff": "^9.0.0",
+    "tinyglobby": "^0.2.15",
+    "typebox": "^1.1.24"
+  },
+  "optionalDependencies": {
+    "@ast-grep/lang-python": "^0.0.5",
+    "@ast-grep/lang-rust": "^0.0.5",
+    "@ast-grep/lang-go": "^0.0.5",
+    "@ast-grep/lang-java": "^0.0.5",
+    "@ast-grep/lang-c": "^0.0.5",
+    "@ast-grep/lang-cpp": "^0.0.5",
+    "@ast-grep/lang-json": "^0.0.5",
+    "@ast-grep/lang-yaml": "^0.0.5"
+  }
+}

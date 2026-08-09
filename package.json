@@ -1,0 +1,40 @@
+{
+  "name": "pi-omp-tools",
+  "private": true,
+  "description": "oh-my-pi-inspired file & search tools (read, write, hashline edit, search, find, ast_grep, ast_edit) as separate pi/prime-agent extension packages",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git"
+  },
+  "pi": {
+    "extensions": [
+      "./packages/pi-read/index.ts",
+      "./packages/pi-write/index.ts",
+      "./packages/pi-hashline-edit/index.ts",
+      "./packages/pi-search/index.ts",
+      "./packages/pi-find/index.ts",
+      "./packages/pi-ast-grep/index.ts",
+      "./packages/pi-ast-edit/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^24.0.0"
+  }
+}

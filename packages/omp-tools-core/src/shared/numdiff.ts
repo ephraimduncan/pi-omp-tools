@@ -35,3 +35,12 @@ export function numberedDiff(before: string, after: string, context = 2): string
 	}
 	return out.join("\n");
 }
+
+/** First changed (+/-) line number in a numbered diff, for editor jumps. */
+export function firstChangedLineOf(diff: string): number | undefined {
+	for (const line of diff.split("\n")) {
+		const match = /^[+-]\s*(\d+) /.exec(line);
+		if (match) return Number.parseInt(match[1] as string, 10);
+	}
+	return undefined;
+}

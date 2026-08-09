@@ -11,7 +11,7 @@ import type { HashlineSection } from "../hashline/parser.ts";
 import { parsePatch } from "../hashline/parser.ts";
 import { buildPreview } from "../hashline/preview.ts";
 import { buildLineMap, remapOps } from "../hashline/recovery.ts";
-import { numberedDiff } from "../shared/numdiff.ts";
+import { firstChangedLineOf, numberedDiff } from "../shared/numdiff.ts";
 import { computeFileTag, snapshots } from "../shared/snapshots.ts";
 import { denormalizeText, displayPath, normalizeText, pathExists, resolvePath } from "../shared/util.ts";
 
@@ -236,5 +236,24 @@ export async function executeEdit(input: string, ctx?: ToolCtx): Promise<ToolRes
 		if (name !== ANON_REGISTER) sessionRegisters.set(name, value);
 	}
 
-	return textResult(responses.join("\n\n"), { sections: sectionDetails });
+	// Combined numbered diff in the host's built-in edit format. In daemon-mode
+	// prime the TUI cannot receive our render functions, but it CAN replay its
+	// built-in edit renderer (replayBuiltInToolName) — which reads details.diff.
+	const combinedParts: string[] = [];
+	for (const detail of sectionDetails) {
+		if (!detail.diff) continue;
+		if (sectionDetails.length > 1) combinedParts.push(`${detail.path}${detail.tag ? ` #${detail.tag}` : ""}`);
+		combinedParts.push(detail.diff);
+	}
+	let combinedDiff = combinedParts.join("\n");
+	const combinedLines = combinedDiff.split("\n");
+	if (combinedLines.length > 400) {
+		combinedDiff = [...combinedLines.slice(0, 400), `… diff truncated (${combinedLines.length} lines)`].join("\n");
+	}
+
+	return textResult(responses.join("\n\n"), {
+		sections: sectionDetails,
+		diff: combinedDiff,
+		firstChangedLine: firstChangedLineOf(combinedDiff),
+	});
 }

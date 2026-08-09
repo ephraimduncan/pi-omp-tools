@@ -332,15 +332,66 @@ test("guard: bash/ipython file I/O is blocked with redirect reason", async () =>
 		return undefined;
 	};
 	if (guards.length > 0) {
+		// pi-style standalone bash tool
 		const blockedBash = await invoke("bash", { command: "grep -rn foo src/" });
 		assert.ok(blockedBash?.reason?.includes("search"), "bash grep should be blocked");
 		const okBash = await invoke("bash", { command: "mkdir -p x && zip -r a.zip x # omp-ok" });
 		assert.equal(okBash, undefined);
+		// prime-style ipython %%bash cells (QA bug 1)
+		const blockedCell = await invoke("ipython", { code: "%%bash\ngrep -rn greet ." });
+		assert.ok(blockedCell?.reason?.includes("search"), "%%bash grep should be blocked");
+		const blockedCat = await invoke("ipython", { code: "%%bash\ncat app.py" });
+		assert.ok(blockedCat?.reason?.includes("read"), "%%bash cat should be blocked");
+		const okCell = await invoke("ipython", { code: "%%bash\nmkdir -p x && zip -r a.zip x # omp-ok" });
+		assert.equal(okCell, undefined);
+		const okFixture = await invoke("ipython", { code: "%%bash\nsqlite3 data.sqlite 'CREATE TABLE t(x)'" });
+		assert.equal(okFixture, undefined);
+		// python file I/O (QA bug 2 — builtin open in all modes)
 		const blockedPy = await invoke("ipython", { code: "open('x.txt','w').write('hi')" });
 		assert.ok(blockedPy?.reason?.includes("write"), "python open-write should be blocked");
+		const blockedRead = await invoke("ipython", { code: "content = open('app.py').read()" });
+		assert.ok(blockedRead?.reason?.includes("read"), "python open-read should be blocked");
+		const blockedPathlib = await invoke("ipython", { code: "print(Path('a').read_text())" });
+		assert.ok(blockedPathlib?.reason, "read_text should be blocked");
+		const blockedRemove = await invoke("ipython", { code: "import os\nos.remove('x')" });
+		assert.ok(blockedRemove?.reason, "os.remove should be blocked");
 		const okPy = await invoke("ipython", { code: "import math; print(math.pi)" });
 		assert.equal(okPy, undefined);
+		const okEscape = await invoke("ipython", { code: "open('data.csv','w').write(csv)  # omp-ok data export" });
+		assert.equal(okEscape, undefined);
 	}
+});
+
+test("register.ts source contains no control characters (0x08 regression)", async () => {
+	const source = await fs.readFile(new URL("../packages/omp-tools-core/src/register.ts", import.meta.url), "utf8");
+	for (let i = 0; i < source.length; i++) {
+		const codePoint = source.charCodeAt(i);
+		assert.ok(codePoint >= 0x20 || codePoint === 0x0a || codePoint === 0x09, `control char ${codePoint} at index ${i}`);
+	}
+});
+
+test("edit details carry builtin-format diff for daemon replay rendering", async () => {
+	const dir = await makeTempDir();
+	const file = path.join(dir, "replay.txt");
+	await fs.writeFile(file, "one\ntwo\nthree\n");
+	const tag = tagOf(text(await executeRead(file, undefined, { cwd: dir })));
+	const result = await executeEdit(`[replay.txt#${tag}]\nPUT 2.=2:\n+TWO`, { cwd: dir });
+	const details = result.details as { diff?: string; firstChangedLine?: number; sections?: unknown[] };
+	assert.ok(typeof details.diff === "string" && details.diff.length > 0, "details.diff present");
+	assert.match(details.diff as string, /^-\s*2 two$/m);
+	assert.match(details.diff as string, /^\+\s*2 TWO$/m);
+	assert.equal(details.firstChangedLine, 2);
+	assert.ok(Array.isArray(details.sections));
+});
+
+test("edit registration carries replayBuiltInToolName and display path arg", async () => {
+	const { registerEdit } = await import("../packages/omp-tools-core/src/register.ts");
+	const defs: Array<Record<string, unknown>> = [];
+	await registerEdit({ registerTool: (def: Record<string, unknown>) => defs.push(def), on: () => {} } as never);
+	const def = defs[0] as { replayBuiltInToolName?: string; prepareArguments?: (a: unknown) => unknown };
+	assert.equal(def.replayBuiltInToolName, "edit");
+	const prepared = def.prepareArguments?.({ input: "[src/a.ts#AAAA]\nPUT 1.=1:\n+x" }) as { path?: string };
+	assert.equal(prepared?.path, "src/a.ts");
 });
 
 test("renderers: fake host produces colored bodies", async () => {

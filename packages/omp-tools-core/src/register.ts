@@ -110,47 +110,6 @@ function ensurePromptContract(pi: PiApi): void {
 	});
 }
 
-const BASH_FILE_IO_RE =
-	/(?:^|&&|\|\||;)\s*(?:cat|head|tail|less|grep|rg|egrep|fgrep)\s+[^|<>]*$|(?:^|&&|\|\||;)\s*sed\s+(?:-[a-zA-Z]*\s+)*-i|(?:^|&&|\|\||;)\s*find\s+\S/m;
-const PY_FILE_IO_RE =
-	/open\s*\([^)]*["'][wax]\+?["']|\.write_text\s*\(|\.read_text\s*\(|open\s*\([^)]*\)\s*\.\s*read\s*\(|shutil\.copy|os\.remove\s*\(/;
-
-/**
- * Redirect obvious file I/O in bash/ipython to the omp tools. Escape hatches:
- * OMP_TOOLS_NO_GUARD=1 disables entirely; a literal `omp-ok` marker in the
- * command/code allows a specific call through (for legitimate data work).
- */
-function guardFileOps(toolName: string | undefined, input: Record<string, unknown> | undefined): string | null {
-	if (process.env.OMP_TOOLS_NO_GUARD === "1") return null;
-	if (!toolName || !input) return null;
-
-	if (toolName === "bash" && registeredTools.size > 0) {
-		const command = typeof input.command === "string" ? input.command : "";
-		if (!command || command.includes("omp-ok")) return null;
-		if (BASH_FILE_IO_RE.test(command)) {
-			return (
-				"omp-tools: use the dedicated tools instead of shell file I/O — read (cat/head/tail), " +
-				"search (grep/rg), find (find/ls), edit (sed -i). " +
-				"If this command is genuinely not file inspection/editing (e.g. fixture setup), re-run it with `# omp-ok` appended."
-			);
-		}
-		return null;
-	}
-
-	if (toolName === "ipython" && (registeredTools.has("read") || registeredTools.has("edit") || registeredTools.has("write"))) {
-		const code = typeof input.code === "string" ? input.code : "";
-		if (!code || code.includes("omp-ok")) return null;
-		if (PY_FILE_IO_RE.test(code)) {
-			return (
-				"omp-tools: use the dedicated tools instead of python file I/O — read (open/read_text), " +
-				"edit (targeted changes), write (open('w')/write_text). " +
-				"If this code is genuinely data processing rather than file viewing/editing, re-run it with `# omp-ok` in the code."
-			);
-		}
-	}
-	return null;
-}
-
 /**
  * Deactivate built-in tools that duplicate an installed omp tool's purpose.
  * Same-name tools (read/write/edit) are replaced by registration already;
@@ -177,6 +136,85 @@ function retireOverlappingBuiltins(pi: PiApi): void {
 	} catch {
 		/* host without tool management — fine */
 	}
+}
+
+const BASH_FILE_IO_RE = new RegExp(
+	[
+		// leading or chained file-inspection commands (cat foo.txt, x && grep ...)
+		String.raw`(?:^|&&|\|\||;)\s*(?:cat|head|tail|less|grep|rg|egrep|fgrep)\s+[^|<>]*$`,
+		// in-place sed edits anywhere
+		String.raw`(?:^|&&|\|\||;)\s*sed\s+(?:-[a-zA-Z]*\s+)*-i`,
+		// find-based discovery
+		String.raw`(?:^|&&|\|\||;)\s*find\s+\S`,
+	].join("|"),
+	"m",
+);
+
+const PY_FILE_IO_RE = new RegExp(
+	[
+		// open(..., 'w'/'a'/'x') writes and open('r'-less) mode strings
+		String.raw`\bopen\s*\([^)]*["'][rwax]b?\+?["']`,
+		// bare open(...).read()/readlines()
+		String.raw`\bopen\s*\([^)]*\)\s*\.\s*read`,
+		String.raw`\.write_text\s*\(`,
+		String.raw`\.read_text\s*\(`,
+		String.raw`\bshutil\.(?:copy|move|rmtree)`,
+		String.raw`\bos\.(?:remove|unlink|rename)\s*\(`,
+	].join("|"),
+);
+
+/** Extract shell command text from an ipython cell: `%%bash` cells and `!cmd` lines. */
+function shellTextFromIpythonCode(code: string): string | null {
+	const trimmed = code.trimStart();
+	if (trimmed.startsWith("%%bash") || trimmed.startsWith("%%sh")) {
+		const newline = trimmed.indexOf("\n");
+		return newline === -1 ? "" : trimmed.slice(newline + 1);
+	}
+	const bangLines = code
+		.split("\n")
+		.filter(line => /^\s*!/.test(line))
+		.map(line => line.replace(/^\s*!/, ""));
+	return bangLines.length > 0 ? bangLines.join("\n") : null;
+}
+
+/**
+ * Redirect obvious file I/O in bash/ipython to the omp tools. Escape hatches:
+ * OMP_TOOLS_NO_GUARD=1 disables entirely; a literal `omp-ok` marker in the
+ * command/code allows a specific call through (for legitimate data work).
+ */
+function guardFileOps(toolName: string | undefined, input: Record<string, unknown> | undefined): string | null {
+	if (process.env.OMP_TOOLS_NO_GUARD === "1") return null;
+	if (!toolName || !input || registeredTools.size === 0) return null;
+
+	const bashRedirect =
+		"omp-tools: use the dedicated tools instead of shell file I/O — read (cat/head/tail), " +
+		"search (grep/rg), find (find/ls), edit (sed -i). " +
+		"If this command is genuinely not file inspection/editing (e.g. fixture setup), re-run it with `# omp-ok` appended.";
+
+	if (toolName === "bash") {
+		const command = typeof input.command === "string" ? input.command : "";
+		if (!command || command.includes("omp-ok")) return null;
+		if (BASH_FILE_IO_RE.test(command)) return bashRedirect;
+		return null;
+	}
+
+	if (toolName === "ipython" && (registeredTools.has("read") || registeredTools.has("edit") || registeredTools.has("write"))) {
+		const code = typeof input.code === "string" ? input.code : "";
+		if (!code || code.includes("omp-ok")) return null;
+		// prime runs shell through ipython `%%bash` cells and `!` escapes.
+		const shellText = shellTextFromIpythonCode(code);
+		if (shellText !== null) {
+			return BASH_FILE_IO_RE.test(shellText) ? bashRedirect : null;
+		}
+		if (PY_FILE_IO_RE.test(code)) {
+			return (
+				"omp-tools: use the dedicated tools instead of python file I/O — read (open/read_text), " +
+				"edit (targeted changes), write (open('w')/write_text). " +
+				"If this code is genuinely data processing rather than file viewing/editing, re-run it with `# omp-ok` in the code."
+			);
+		}
+	}
+	return null;
 }
 
 export async function registerRead(pi: PiApi): Promise<void> {
@@ -231,17 +269,32 @@ export async function registerEdit(pi: PiApi): Promise<void> {
 	const support = await loadRenderSupport();
 	pi.registerTool({
 		...(support ? editRenderers(support) : {}),
+		// Daemon-attached prime TUIs cannot receive render functions; this string
+		// survives serialization and activates the TUI's built-in edit renderer
+		// (red/green diff from details.diff). In-process hosts (pi) use our own
+		// renderers above, which take precedence over replay.
+		replayBuiltInToolName: "edit",
 		name: "edit",
-		label: "Edit",
+		label: "edit",
 		description: EDIT_DESCRIPTION,
 		promptSnippet: "Hashline patches with content-hash anchors and stale-anchor recovery",
 		promptGuidelines: [
 			"Use edit (hashline patches) for every modification to an existing file instead of sed/awk/python rewrites; anchor each [path#TAG] section with the tag from your latest read or search of that file.",
 		],
 		parameters: Type.Object({
+			path: Type.String({ description: "primary file being edited (display metadata; the patch sections name the real targets)" }),
 			input: Type.String({ description: "hashline patch text ([PATH#TAG] sections with PUT/CUT/REM/MV ops and +body rows)" }),
 		}),
-		async execute(_id: string, params: { input: string }, _signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd?: string }) {
+		prepareArguments(args: unknown) {
+			// Older sessions (and forgetful models) may omit `path`; derive it from
+			// the first section header so validation passes.
+			if (!args || typeof args !== "object") return args;
+			const input = args as { path?: unknown; input?: unknown };
+			if (typeof input.path === "string" || typeof input.input !== "string") return args;
+			const header = /^\[([^\]#]+)/m.exec(input.input);
+			return { ...input, path: header?.[1] ?? "" };
+		},
+		async execute(_id: string, params: { path?: string; input: string }, _signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd?: string }) {
 			return executeEdit(params.input, ctx);
 		},
 	});

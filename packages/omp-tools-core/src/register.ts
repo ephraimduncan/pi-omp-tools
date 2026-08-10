@@ -222,7 +222,7 @@ export async function registerRead(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? readRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...readRenderers(support) } : {}),
 		name: "read",
 		label: "Read",
 		description: READ_DESCRIPTION,
@@ -245,7 +245,7 @@ export async function registerWrite(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? writeRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...writeRenderers(support) } : {}),
 		name: "write",
 		label: "Write",
 		description: WRITE_DESCRIPTION,
@@ -268,7 +268,7 @@ export async function registerEdit(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? editRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...editRenderers(support) } : {}),
 		// Daemon-attached prime TUIs cannot receive render functions; this string
 		// survives serialization and activates the TUI's built-in edit renderer
 		// (red/green diff from details.diff). In-process hosts (pi) use our own
@@ -305,7 +305,7 @@ export async function registerSearch(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? searchRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...searchRenderers(support) } : {}),
 		name: "search",
 		label: "Search",
 		description: SEARCH_DESCRIPTION,
@@ -334,7 +334,7 @@ export async function registerFind(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? findRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...findRenderers(support) } : {}),
 		name: "find",
 		label: "Find",
 		description: FIND_DESCRIPTION,
@@ -359,7 +359,7 @@ export async function registerAstGrep(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? astGrepRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...astGrepRenderers(support) } : {}),
 		name: "ast_grep",
 		label: "AST Grep",
 		description: AST_GREP_DESCRIPTION,
@@ -384,7 +384,7 @@ export async function registerAstEdit(pi: PiApi): Promise<void> {
 	ensurePromptContract(pi);
 	const support = await loadRenderSupport();
 	pi.registerTool({
-		...(support ? astEditRenderers(support) : {}),
+		...(support ? { renderShell: "self", ...astEditRenderers(support) } : {}),
 		name: "ast_edit",
 		label: "AST Edit",
 		description: AST_EDIT_DESCRIPTION,

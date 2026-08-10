@@ -394,7 +394,7 @@ test("edit registration carries replayBuiltInToolName and display path arg", asy
 	assert.equal(prepared?.path, "src/a.ts");
 });
 
-test("renderers: fake host produces colored bodies", async () => {
+test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	const { editRenderers, searchRenderers, readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
 	class FakeText {
 		text: string;
@@ -405,51 +405,62 @@ test("renderers: fake host produces colored bodies", async () => {
 	const R = {
 		Text: FakeText as never,
 		Container: FakeText as never,
-		renderDiff: (diff: string) => diff.split("\n").map(line => (line.startsWith("+") ? `G${line}` : line.startsWith("-") ? `R${line}` : line)).join("\n"),
 	} as never;
 	const theme = {
 		fg: (_c: string, text: string) => text,
 		bold: (text: string) => text,
 		inverse: (text: string) => `<${text}>`,
 	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(80).join("\n") : (boxLike.text ?? "");
+	};
 
 	const edit = editRenderers(R);
-	const editOut = edit.renderResult(
-		{ details: { sections: [{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] }] } },
-		{ expanded: false },
-		theme,
-		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(editOut.text, /a\.ts #AAAA/);
-	assert.match(editOut.text, /R-1 old/);
-	assert.match(editOut.text, /G\+1 new/);
-	assert.match(editOut.text, /⚠ careful/);
+	const editOut = renderLines(
+		edit.renderResult(
+			{ details: { sections: [{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] }] } },
+			{ expanded: false },
+			theme,
+			{},
+		),
+	);
+	assert.match(editOut, /╭─── ✎ Edit: 🟦 a\.ts#AAAA ⟦\+1\/-1⟧/);
+	assert.match(editOut, / {2}-1│<old>/);
+	assert.match(editOut, /⚠ careful/);
+	assert.match(editOut, /╰─+╯/);
 
 	const search = searchRenderers(R);
-	const searchOut = search.renderResult(
-		{
-			details: {
-				pattern: "needle",
-				files: [{ path: "b.ts", tag: "BBBB", rows: [{ n: 3, text: "a needle here", isMatch: true }], more: 0 }],
-				summary: "1 matches in 1 files",
+	const searchOut = renderLines(
+		search.renderResult(
+			{
+				details: {
+					pattern: "needle",
+					files: [{ path: "b.ts", tag: "BBBB", rows: [{ n: 3, text: "a needle here", isMatch: true }], more: 0 }],
+					summary: "1 matches in 1 files",
+				},
 			},
-		},
-		{ expanded: false },
-		theme,
-		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(searchOut.text, /b\.ts #BBBB/);
-	assert.match(searchOut.text, /3 a <needle> here/);
+			{ expanded: false },
+			theme,
+			{},
+		),
+	);
+	assert.match(searchOut, /🔍 Search: needle 1 match · 1 file/);
+	assert.match(searchOut, /└─ b\.ts#BBBB/);
+	assert.match(searchOut, /\*3│a <needle> here/);
 
 	const read = readRenderers(R);
-	const readOut = read.renderResult(
-		{ details: { kind: "text", path: "c.ts", tag: "CCCC", rows: [{ n: 1, text: "const x = 1;" }] } },
-		{ expanded: false },
-		theme,
-		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(readOut.text, /c\.ts #CCCC/);
-	assert.match(readOut.text, /1 const x = 1;/);
+	const readOut = renderLines(
+		read.renderResult(
+			{ details: { kind: "text", path: "c.ts", tag: "CCCC", rows: [{ n: 1, text: "const x = 1;" }] } },
+			{ expanded: false },
+			theme,
+			{},
+		),
+	);
+	assert.match(readOut, /╭─── 🟦 • Read: c\.ts#CCCC · 1 line /);
+	assert.match(readOut, / 1 const x = 1;/);
+	assert.match(readOut, /╰─+╯/);
 });
 
 test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", async () => {

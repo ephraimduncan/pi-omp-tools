@@ -1156,6 +1156,9 @@ export function todoRenderers(R: RenderSupport): Renderers {
 
 const GITHUB_OP_TITLES: Record<string, string> = {
 	repo_view: "GitHub Repo",
+	issue_view: "GitHub Issue",
+	pr_view: "GitHub PR",
+	pr_diff: "GitHub PR Diff",
 	file_read: "GitHub File",
 	pr_create: "GitHub PR Create",
 	pr_checkout: "GitHub PR Checkout",
@@ -1168,6 +1171,48 @@ const GITHUB_OP_TITLES: Record<string, string> = {
 	run_watch: "GitHub Run Watch",
 };
 
+const STATE_BADGE_COLORS: Record<string, string> = {
+	open: "success",
+	success: "success",
+	completed: "success",
+	pushed: "success",
+	ready: "success",
+	approved: "success",
+	merged: "accent",
+	in_progress: "accent",
+	running: "accent",
+	watching: "accent",
+	closed: "error",
+	failure: "error",
+	failed: "error",
+	timed_out: "error",
+	cancelled: "error",
+	action_required: "error",
+	changes_requested: "error",
+	draft: "dim",
+	queued: "warning",
+	pending: "warning",
+	waiting: "warning",
+};
+
+function stateBadge(theme: Any, state: unknown): string {
+	if (typeof state !== "string" || state.length === 0) return "";
+	const color = STATE_BADGE_COLORS[state.toLowerCase()] ?? "muted";
+	return fg(theme, color, `⟦${state.toUpperCase()}⟧`);
+}
+
+/** Relative age (`2h ago`) for GitHub timestamps; empty when unparsable. */
+function ageOf(iso: unknown): string {
+	if (typeof iso !== "string") return "";
+	const then = Date.parse(iso);
+	if (Number.isNaN(then)) return "";
+	const minutes = Math.max(0, Math.round((Date.now() - then) / 60_000));
+	if (minutes < 60) return `${minutes}m ago`;
+	if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
+	if (minutes < 60 * 24 * 30) return `${Math.round(minutes / (60 * 24))}d ago`;
+	return iso.slice(0, 10);
+}
+
 function githubMeta(args: Any): string[] {
 	const meta: string[] = [];
 	if (typeof args?.repo === "string") meta.push(args.repo);
@@ -1175,6 +1220,266 @@ function githubMeta(args: Any): string[] {
 	if (typeof args?.query === "string") meta.push(args.query);
 	if (typeof args?.path === "string") meta.push(args.path);
 	return meta;
+}
+
+/** Dim-label field rows, two pairs per row (`Forks  0   Permission  ADMIN`). */
+function fieldGrid(theme: Any, pairs: Array<[string, string]>): string[] {
+	const labelWidth = Math.max(...pairs.map(pair => pair[0].length));
+	const cell = (pair: [string, string]) => `${fg(theme, "dim", pair[0].padEnd(labelWidth))}  ${pair[1]}`;
+	const rows: string[] = [];
+	for (let i = 0; i < pairs.length; i += 2) {
+		const left = pairs[i] as [string, string];
+		const right = pairs[i + 1];
+		const leftCell = cell(left);
+		rows.push(right ? `${leftCell}${" ".repeat(Math.max(2, 44 - stripAnsi(leftCell).length))}${cell(right)}` : leftCell);
+	}
+	return rows;
+}
+
+function statPair(theme: Any, additions: unknown, deletions: unknown): string {
+	return fg(theme, "toolDiffAdded", `+${typeof additions === "number" ? additions : 0}`) + fg(theme, "dim", "/") + fg(theme, "toolDiffRemoved", `-${typeof deletions === "number" ? deletions : 0}`);
+}
+
+/** `├─ 🟦 path  +a/-d` rows for PR file listings. */
+function ghFileRows(theme: Any, files: Any[], cap: number): string[] {
+	const width = Math.min(60, Math.max(...files.map(file => String(file.path ?? "").length)));
+	const rows = files.slice(0, cap).map((file, index) => {
+		const last = index === Math.min(files.length, cap) - 1 && files.length <= cap;
+		const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+		const label = String(file.path ?? "(unknown file)");
+		const icon = fg(theme, "muted", fileIcon(label));
+		return `${prefix}${icon} ${fg(theme, "toolOutput", label.padEnd(width))}  ${statPair(theme, file.additions, file.deletions)}`;
+	});
+	if (files.length > cap) rows.push(fg(theme, "dim", `${TREE.last}… ${files.length - cap} more files`));
+	return rows;
+}
+
+/** First non-empty body line, whitespace-collapsed, for list rows. */
+function snippetOf(body: unknown, max = 70): string {
+	if (typeof body !== "string") return "";
+	const flat = body.replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function ghUserLabel(value: Any): string {
+	if (typeof value?.login === "string") return `@${value.login}`;
+	return typeof value?.name === "string" ? value.name : "";
+}
+
+function ghRepoBox(R: RenderSupport, theme: Any, repo: Any): Any {
+	const badges: string[] = [];
+	if (repo.visibility) badges.push(fg(theme, repo.visibility === "PUBLIC" ? "success" : "warning", `⟦${repo.visibility}⟧`));
+	if (typeof repo.stargazerCount === "number") badges.push(fg(theme, "warning", `★${repo.stargazerCount}`));
+	const meta: string[] = [];
+	if (repo.primaryLanguage?.name) meta.push(repo.primaryLanguage.name);
+	if (repo.defaultBranchRef?.name) meta.push(repo.defaultBranchRef.name);
+	const header = [
+		fg(theme, "accent", "⎇"),
+		fg(theme, "toolTitle", bold(theme, String(repo.nameWithOwner ?? "GitHub repository"))),
+		...badges.filter(badge => badge.length > 0),
+		...(meta.length > 0 ? [fg(theme, "dim", meta.join(" · "))] : []),
+	].join(" ");
+
+	const rows: string[] = [fg(theme, "toolOutput", String(repo.description ?? "").trim() || "No description provided."), ""];
+	const pairs: Array<[string, string]> = [];
+	if (typeof repo.forkCount === "number") pairs.push(["Forks", String(repo.forkCount)]);
+	if (repo.viewerPermission) pairs.push(["Permission", String(repo.viewerPermission)]);
+	if (repo.updatedAt) pairs.push(["Updated", ageOf(repo.updatedAt) || String(repo.updatedAt)]);
+	const topics = (repo.repositoryTopics ?? [])
+		.map((item: Any) => item.name ?? item.topic?.name)
+		.filter(Boolean)
+		.join(", ");
+	if (topics) pairs.push(["Topics", topics]);
+	if (repo.homepageUrl) pairs.push(["Homepage", String(repo.homepageUrl)]);
+	if (repo.isArchived === true) pairs.push(["Archived", "yes"]);
+	if (repo.isFork === true) pairs.push(["Fork", "yes"]);
+	rows.push(...fieldGrid(theme, pairs));
+	if (repo.url) rows.push(`${fg(theme, "dim", "URL".padEnd(Math.max(...pairs.map(pair => pair[0].length), 3)))}  ${fg(theme, "accent", String(repo.url))}`);
+	return boxed(R, theme, { header, sections: [{ rows }] });
+}
+
+function ghIssuePrBox(
+	R: RenderSupport,
+	theme: Any,
+	kind: "PR" | "Issue",
+	data: Any,
+	expanded: boolean,
+): Any {
+	const state = data.isDraft === true ? "draft" : data.state;
+	const header = [
+		fg(theme, "accent", "⎇"),
+		fg(theme, "toolTitle", bold(theme, `${kind} #${data.number ?? "?"}`)),
+		String(data.title ?? "Untitled"),
+		stateBadge(theme, state),
+	]
+		.filter(part => part.length > 0)
+		.join(" ");
+
+	const factParts: string[] = [];
+	if (kind === "PR" && data.headRefName) {
+		factParts.push(`${fg(theme, "accent", String(data.headRefName))} ${fg(theme, "dim", "→")} ${fg(theme, "accent", String(data.baseRefName ?? "?"))}`);
+	}
+	const author = ghUserLabel(data.author);
+	if (author) factParts.push(author);
+	const age = ageOf(data.createdAt);
+	if (age) factParts.push(`opened ${age}`);
+	const facts: string[] = [factParts.join(fg(theme, "dim", " · "))];
+
+	const factParts2: string[] = [];
+	if (data.reviewDecision) factParts2.push(`Review ${fg(theme, data.reviewDecision === "APPROVED" ? "success" : "warning", String(data.reviewDecision))}`);
+	if (data.mergeStateStatus) factParts2.push(`Merge state ${fg(theme, "muted", String(data.mergeStateStatus))}`);
+	const labelNames = (data.labels ?? []).map((label: Any) => label.name).filter(Boolean);
+	if (labelNames.length > 0) factParts2.push(`Labels ${fg(theme, "muted", labelNames.join(", "))}`);
+	if (data.stateReason) factParts2.push(`Reason ${fg(theme, "muted", String(data.stateReason))}`);
+	if (factParts2.length > 0) facts.push(factParts2.join(fg(theme, "dim", " · ")));
+	if (data.url) facts.push(fg(theme, "dim", String(data.url)));
+
+	const sections: BoxSection[] = [{ rows: facts }];
+
+	const bodyText = String(data.body ?? "").trim();
+	const bodyRows = (bodyText || "No description provided.").split("\n").map(line => fg(theme, "toolOutput", line));
+	const bodyWindowed = bodyWindow(bodyRows, expanded, COLLAPSED_CODE_LINES);
+	const bodyTail = moreLine(R, theme, bodyWindowed.hidden, expanded);
+	if (bodyTail) bodyWindowed.shown.push(bodyTail);
+	sections.push({ label: "Body", rows: bodyWindowed.shown });
+
+	const files = (data.files ?? []) as Any[];
+	if (files.length > 0) {
+		const additions = files.reduce((sum: number, file: Any) => sum + (file.additions ?? 0), 0);
+		const deletions = files.reduce((sum: number, file: Any) => sum + (file.deletions ?? 0), 0);
+		sections.push({
+			label: `Files ${files.length} · +${additions}/-${deletions}`,
+			rows: ghFileRows(theme, files, expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS),
+		});
+	}
+
+	const reviews = (data.reviews ?? []) as Any[];
+	const comments = (data.comments ?? []) as Any[];
+	if (reviews.length > 0 || comments.length > 0) {
+		const rows: string[] = [];
+		for (const review of reviews) {
+			rows.push(
+				`${ghUserLabel(review.author) || "unknown"} ${stateBadge(theme, review.state)}${review.body ? ` ${fg(theme, "dim", "·")} ${fg(theme, "toolOutput", snippetOf(review.body))}` : ""}`,
+			);
+		}
+		for (const comment of comments) {
+			const age2 = ageOf(comment.createdAt);
+			rows.push(
+				`${ghUserLabel(comment.author) || "unknown"}${age2 ? ` ${fg(theme, "dim", `· ${age2}`)}` : ""} ${fg(theme, "dim", "·")} ${fg(theme, "toolOutput", snippetOf(comment.body))}`,
+			);
+		}
+		const capped = bodyWindow(
+			rows.map((row, index) => fg(theme, "dim", index === rows.length - 1 ? TREE.last : TREE.branch) + row),
+			expanded,
+			6,
+		);
+		const tail = moreLine(R, theme, capped.hidden, expanded, "entries");
+		if (tail) capped.shown.push(tail);
+		const labels: string[] = [];
+		if (reviews.length > 0) labels.push(`Reviews ${reviews.length}`);
+		if (comments.length > 0) labels.push(`Comments ${comments.length}`);
+		sections.push({ label: labels.join(" · "), rows: capped.shown });
+	}
+
+	return boxed(R, theme, { header, sections });
+}
+
+/** One `#N title ⟦STATE⟧ @author · age` row per search hit. */
+function ghSearchRows(theme: Any, items: Any[], cap: number): string[] {
+	const rows = items.slice(0, cap).map((item, index) => {
+		const last = index === Math.min(items.length, cap) - 1 && items.length <= cap;
+		const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+		const title = String(item.title ?? item.name ?? item.full_name ?? item.path ?? "Untitled");
+		const parts: string[] = [];
+		if (typeof item.number === "number") parts.push(fg(theme, "accent", `#${item.number}`));
+		parts.push(fg(theme, "toolOutput", title));
+		const badge = stateBadge(theme, item.state);
+		if (badge) parts.push(badge);
+		const author = ghUserLabel(item.author ?? item.user);
+		const age = ageOf(item.updatedAt ?? item.updated_at ?? item.createdAt ?? item.created_at);
+		const trail = [author, age].filter(part => part.length > 0).join(" · ");
+		if (trail) parts.push(fg(theme, "dim", trail));
+		return `${prefix}${parts.join(" ")}`;
+	});
+	if (items.length > cap) rows.push(fg(theme, "dim", `${TREE.last}… ${items.length - cap} more results`));
+	return rows;
+}
+
+const RUN_ICON_BY_STATE: Record<string, StatusKindName> = {
+	success: "success",
+	neutral: "success",
+	skipped: "done",
+	completed: "success",
+	failure: "error",
+	timed_out: "error",
+	cancelled: "error",
+	action_required: "error",
+	startup_failure: "error",
+	in_progress: "running",
+	queued: "pending",
+	requested: "pending",
+	waiting: "pending",
+	pending: "pending",
+};
+
+type StatusKindName = keyof typeof STATUS;
+
+function runStateIcon(theme: Any, conclusion: unknown, status: unknown): string {
+	const key = String(conclusion || status || "").toLowerCase();
+	return statusIcon(theme, RUN_ICON_BY_STATE[key] ?? "info");
+}
+
+function jobDuration(job: Any): string {
+	const start = Date.parse(String(job.startedAt ?? ""));
+	const end = Date.parse(String(job.completedAt ?? ""));
+	if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "";
+	const seconds = Math.round((end - start) / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function ghRunWatchBox(R: RenderSupport, theme: Any, details: Any, expanded: boolean): Any {
+	const runs: Any[] = Array.isArray(details.runs)
+		? details.runs
+		: [{ status: details.status, conclusion: details.conclusion, jobs: details.jobs, url: details.url, databaseId: details.runId }];
+	const first = runs[0] ?? {};
+	const header = [
+		fg(theme, "accent", "⎇"),
+		fg(theme, "toolTitle", bold(theme, "Run Watch")),
+		String(first.workflowName ?? first.displayTitle ?? ""),
+		stateBadge(theme, details.state === "completed" ? (first.conclusion ?? "completed") : "running"),
+		fg(theme, "dim", [details.repo, first.headBranch, first.headSha?.slice(0, 7)].filter(Boolean).join(" · ")),
+	]
+		.filter(part => part.length > 0)
+		.join(" ");
+
+	const rows: string[] = [];
+	for (const run of runs) {
+		if (rows.length > 0) rows.push("");
+		const runLabel = String(run.workflowName ?? run.displayTitle ?? "workflow");
+		rows.push(`${runStateIcon(theme, run.conclusion, run.status)} ${fg(theme, "toolOutput", runLabel)} ${fg(theme, "dim", String(run.conclusion || run.status || ""))}`);
+		const jobs = (run.jobs ?? []) as Any[];
+		jobs.forEach((job, index) => {
+			const prefix = fg(theme, "dim", `  ${index === jobs.length - 1 ? TREE.last : TREE.branch}`);
+			const duration = jobDuration(job);
+			rows.push(
+				`${prefix}${runStateIcon(theme, job.conclusion, job.status)} ${fg(theme, "toolOutput", String(job.name ?? "job"))}${duration ? ` ${fg(theme, "dim", duration)}` : ""}${!job.conclusion && job.status ? ` ${fg(theme, "dim", String(job.status))}` : ""}`,
+			);
+		});
+	}
+	const sections: BoxSection[] = [{ rows }];
+	if (typeof details.failedLog === "string" && details.failedLog.length > 0) {
+		const logRows = details.failedLog.split("\n").map((line: string) => fg(theme, "error", line));
+		const windowed = bodyWindow(logRows, expanded, COLLAPSED_CODE_LINES);
+		const tail = moreLine(R, theme, windowed.hidden, expanded);
+		if (tail) windowed.shown.push(tail);
+		sections.push({ label: "Failed log", rows: windowed.shown });
+	}
+	return boxed(R, theme, {
+		header,
+		borderColor: details.failedLog ? "error" : undefined,
+		sections,
+	});
 }
 
 export function githubRenderers(R: RenderSupport): Renderers {
@@ -1188,11 +1493,99 @@ export function githubRenderers(R: RenderSupport): Renderers {
 			markDone(context);
 			const details = result?.details as Any;
 			const callArgs = context?.args as Any;
-			const title = GITHUB_OP_TITLES[argText(details?.op ?? callArgs?.op)] ?? "GitHub";
+			const op = argText(details?.op ?? callArgs?.op);
+			const title = GITHUB_OP_TITLES[op] ?? "GitHub";
 			if (context?.isError) return errorBox(R, theme, title, githubMeta(callArgs).join(" "), result);
+			const icon = fg(theme, "accent", "⎇");
+			const data = details?.data as Any;
+
+			if (op === "repo_view" && data?.nameWithOwner) return ghRepoBox(R, theme, data);
+			if ((op === "pr_view" || op === "issue_view") && data?.number !== undefined) {
+				return ghIssuePrBox(R, theme, op === "pr_view" ? "PR" : "Issue", data, expanded);
+			}
+			if (op === "pr_diff" && Array.isArray(data?.files)) {
+				const files = data.files as Any[];
+				const additions = files.reduce((sum: number, file: Any) => sum + (file.additions ?? 0), 0);
+				const deletions = files.reduce((sum: number, file: Any) => sum + (file.deletions ?? 0), 0);
+				const header = plainHeader(theme, icon, "GitHub PR Diff", [`${files.length} file${files.length === 1 ? "" : "s"}`]) + ` ${statPair(theme, additions, deletions)}`;
+				return lineText(R, [header, ...ghFileRows(theme, files, expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS)]);
+			}
+			if (op.startsWith("search_") && Array.isArray(data?.items)) {
+				const items = data.items as Any[];
+				if (items.length === 0) return noMatches(R, theme, title, argText(callArgs?.query));
+				const header = statusLine(theme, {
+					icon: fg(theme, "toolTitle", "🔍"),
+					title,
+					description: fg(theme, "muted", argText(callArgs?.query)),
+					meta: [`${items.length} result${items.length === 1 ? "" : "s"}`],
+				});
+				return lineText(R, [header, ...ghSearchRows(theme, items, expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS)]);
+			}
+			if (op === "pr_create" && typeof details?.url === "string") {
+				const refs = [details.head, details.base].filter(Boolean);
+				const headerParts = [
+					statusIcon(theme, "success"),
+					fg(theme, "toolTitle", bold(theme, "GitHub PR Create:")),
+					details.title ? String(details.title) : "",
+					stateBadge(theme, details.draft === true ? "draft" : "open"),
+				].filter((part: string) => part.length > 0);
+				const factRow =
+					fg(theme, "dim", TREE.last) +
+					fg(theme, "accent", String(details.url)) +
+					(refs.length === 2 ? fg(theme, "dim", ` · ${refs[0]} → ${refs[1]}`) : "");
+				return lineText(R, [headerParts.join(" "), factRow]);
+			}
+			if (op === "pr_checkout" && Array.isArray(details?.checkouts)) {
+				const checkouts = details.checkouts as Any[];
+				const lines = [
+					plainHeader(theme, icon, "GitHub PR Checkout", [`${checkouts.length} pull request${checkouts.length === 1 ? "" : "s"}`]),
+				];
+				checkouts.forEach((checkout, index) => {
+					const prefix = fg(theme, "dim", index === checkouts.length - 1 ? TREE.last : TREE.branch);
+					lines.push(
+						`${prefix}${fg(theme, "accent", `#${checkout.prNumber}`)} ${stateBadge(theme, checkout.reused ? "ready" : "open") || ""} ${fg(theme, "toolOutput", String(checkout.worktreePath))} ${fg(theme, "dim", `· ${checkout.branch} · remote ${checkout.remoteBranch}${checkout.reused ? " · reused" : ""}`)}`,
+					);
+				});
+				return lineText(R, lines);
+			}
+			if (op === "pr_push" && typeof details?.remoteBranch === "string") {
+				const header = [
+					icon,
+					fg(theme, "toolTitle", bold(theme, "GitHub PR Push:")),
+					fg(theme, "accent", String(details.branch ?? "HEAD")),
+					fg(theme, "dim", "→"),
+					fg(theme, "accent", String(details.remoteBranch)),
+					stateBadge(theme, "pushed"),
+				].join(" ");
+				const rows = [header];
+				if (details.url) rows.push(fg(theme, "dim", TREE.last) + fg(theme, "accent", String(details.url)));
+				return lineText(R, rows);
+			}
+			if (op === "file_read" && typeof details?.output === "string") {
+				const filePath = argText(callArgs?.path);
+				const fileLines = details.output.replace(/\n$/, "").split("\n");
+				const rows = codeRows(
+					R,
+					theme,
+					fileLines.map((text: string, index: number) => ({ n: index + 1, text })),
+					{ language: languageFor(R, filePath) },
+				);
+				const windowed = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES);
+				const tail = moreLine(R, theme, windowed.hidden, expanded);
+				if (tail) windowed.shown.push(tail);
+				const scope = [details.repo, filePath].filter(Boolean).join(":") + (details.branch ? ` @ ${details.branch}` : "");
+				return boxed(R, theme, {
+					header: `${icon} ${fg(theme, "muted", fileIcon(filePath))} ${fg(theme, "toolTitle", bold(theme, "GitHub File:"))} ${fg(theme, "accent", scope)}${fg(theme, "dim", ` · ${fileLines.length} line${fileLines.length === 1 ? "" : "s"}`)}`,
+					sections: [{ rows: windowed.shown }],
+				});
+			}
+			if (op === "run_watch" && (Array.isArray(details?.runs) || Array.isArray(details?.jobs))) {
+				return ghRunWatchBox(R, theme, details, expanded);
+			}
+
+			// Fallback: text lines, boxed when multi-line.
 			const lines = textOf(result).split("\n");
 			while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-			const icon = fg(theme, "accent", "⎇");
 			if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
 				return lineText(R, [statusLine(theme, { icon, title, description: fg(theme, "dim", "no output") })]);
 			}
@@ -1203,10 +1596,7 @@ export function githubRenderers(R: RenderSupport): Renderers {
 			const { shown, hidden } = bodyWindow(rows, expanded, 20);
 			const tail = moreLine(R, theme, hidden, expanded);
 			if (tail) shown.push(tail);
-			return boxed(R, theme, {
-				header: plainHeader(theme, icon, title, githubMeta(callArgs)),
-				sections: [{ rows: shown }],
-			});
+			return boxed(R, theme, { header: plainHeader(theme, icon, title, githubMeta(callArgs)), sections: [{ rows: shown }] });
 		},
 	};
 }

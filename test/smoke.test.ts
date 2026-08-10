@@ -555,6 +555,110 @@ test("renderers: todo box, web_search sections, github inline line", async () =>
 	assert.match(boxedOut, /line two/);
 });
 
+test("renderers: github structured layouts (repo box, pr box, search rows, run watch)", async () => {
+	const { githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => text,
+	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(90).join("\n") : (boxLike.text ?? "");
+	};
+	const github = githubRenderers(R);
+	const call = (details: Record<string, unknown>, args: Record<string, unknown>) =>
+		renderLines(github.renderResult({ content: [{ type: "text", text: "fallback text" }], details }, { expanded: false }, theme, { args, state: {} }));
+
+	const repoOut = call(
+		{
+			op: "repo_view",
+			data: {
+				nameWithOwner: "a/b",
+				description: "demo repo",
+				url: "https://github.com/a/b",
+				visibility: "PUBLIC",
+				stargazerCount: 3,
+				forkCount: 1,
+				primaryLanguage: { name: "TypeScript" },
+				defaultBranchRef: { name: "main" },
+			},
+		},
+		{ op: "repo_view" },
+	);
+	assert.match(repoOut, /╭─── ⎇ a\/b ⟦PUBLIC⟧ ★3 TypeScript · main/);
+	assert.match(repoOut, /demo repo/);
+	assert.match(repoOut, /Forks\s+1/);
+
+	const prOut = call(
+		{
+			op: "pr_view",
+			data: {
+				number: 7,
+				title: "add pagination",
+				state: "OPEN",
+				author: { login: "lin" },
+				headRefName: "feat/pages",
+				baseRefName: "main",
+				body: "body first line",
+				files: [{ path: "src/a.ts", additions: 5, deletions: 2 }],
+				comments: [{ author: { login: "ada" }, body: "ship it" }],
+			},
+		},
+		{ op: "pr_view", pr: "7" },
+	);
+	assert.match(prOut, /╭─── ⎇ PR #7 add pagination ⟦OPEN⟧/);
+	assert.match(prOut, /feat\/pages → main · @lin/);
+	assert.match(prOut, /├─── Body ─/);
+	assert.match(prOut, /├─── Files 1 · \+5\/-2 ─/);
+	assert.match(prOut, /└─ 🟦 src\/a\.ts\s+\+5\/-2/);
+	assert.match(prOut, /├─── Comments 1 ─/);
+	assert.match(prOut, /└─ @ada · ship it/);
+
+	const searchOut = call(
+		{
+			op: "search_issues",
+			data: { items: [{ number: 9, title: "bug in read", state: "open", user: { login: "sam" } }] },
+		},
+		{ op: "search_issues", query: "read" },
+	);
+	assert.equal(searchOut.includes("╭"), false); // search stays frameless
+	assert.match(searchOut, /🔍 GitHub Search Issues: read 1 result/);
+	assert.match(searchOut, /└─ #9 bug in read ⟦OPEN⟧ @sam/);
+
+	const watchOut = call(
+		{
+			op: "run_watch",
+			state: "completed",
+			runs: [
+				{
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "failure",
+					jobs: [{ name: "test", conclusion: "failure" }],
+				},
+			],
+			failedLog: "boom",
+		},
+		{ op: "run_watch" },
+	);
+	assert.match(watchOut, /╭─── ⎇ Run Watch CI ⟦FAILURE⟧/);
+	assert.match(watchOut, /└─ ✘ test/);
+	assert.match(watchOut, /├─── Failed log ─/);
+	assert.match(watchOut, /boom/);
+
+	// Ops without structured details keep the fallback text rendering.
+	const fallbackOut = call({ op: "repo_view" }, { op: "repo_view", repo: "a/b" });
+	assert.match(fallbackOut, /⎇ GitHub Repo: fallback text/);
+});
+
 test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", async () => {
 	const dir = await makeTempDir();
 	await fs.mkdir(path.join(dir, "src"), { recursive: true });

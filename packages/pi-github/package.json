@@ -1,0 +1,38 @@
+{
+  "name": "@ephraimduncan/pi-github",
+  "version": "0.1.0",
+  "description": "GitHub CLI tool for pi/prime-agent: repositories, files, pull requests, search, worktrees, and Actions runs",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "github"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-github"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-github#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ephraimduncan/omp-tools-core": "^0.1.0"
+  }
+}

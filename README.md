@@ -2,7 +2,7 @@
 
 [oh-my-pi](https://github.com/can1357/oh-my-pi)-inspired file & search tools for [pi](https://pi.dev) and [prime-agent](https://github.com/earendil-works), packaged as separate extensions.
 
-Lean reimplementations of omp's core tool suite — no omp runtime, just the ideas:
+Lean reimplementations of omp's tool suite, without the omp runtime:
 
 | Package | Tool | Description |
 |---------|------|-------------|
@@ -13,6 +13,11 @@ Lean reimplementations of omp's core tool suite — no omp runtime, just the ide
 | [pi-find](packages/pi-find) | `find` | Glob path lookup, newest-first, gitignore-aware |
 | [pi-ast-grep](packages/pi-ast-grep) | `ast_grep` | Structural code queries via tree-sitter (ast-grep patterns) |
 | [pi-ast-edit](packages/pi-ast-edit) | `ast_edit` | Structural rewrites, previewed before apply |
+| [pi-todo](packages/pi-todo) | `todo` | Phased session task list. You refer to tasks by verbatim content. The earliest open task auto-promotes. |
+| [pi-web-search](packages/pi-web-search) | `web_search` | One web query through Exa or Parallel. The result contains an answer and citations. |
+| [pi-github](packages/pi-github) | `github` | GitHub operations through the logged-in `gh` CLI: repositories, files, pull request create/checkout/push, issue and PR views, search, and Actions run-watch |
+| [pi-browser](packages/pi-browser) | `browser` | Persistent tabs use raw CDP. If Obscura is installed, the tool uses Obscura. If not, the tool uses a Chromium browser. The tool does not use Puppeteer. |
+| [pi-inspect-image](packages/pi-inspect-image) | `inspect_image` | Vision-model analysis of a local image file through the Anthropic, OpenAI-compatible, or Gemini APIs |
 | [pi-tmp-scratch](packages/pi-tmp-scratch) | — | Per-session scratch dir under `/tmp` + prompt steering: temporary work never lands in the repo, and wiping `/tmp` is always safe (`/scratch`, `/scratch clean`) |
 
 All tools share one engine ([omp-tools-core](packages/omp-tools-core)) and one snapshot store (anchored on `globalThis`, so tags minted by `read`/`search` validate in `edit` even when the tools are installed as separate packages).
@@ -111,6 +116,11 @@ response                 →  [src/foo.ts#9F3E] updated
 
 - Node ≥ 20 (or Bun) in the host agent.
 - Recommended on PATH: `rg` (search/find/file-walking), `unzip`/`zip` (zip archives), `tar`, `pdftotext` (PDFs). Everything degrades gracefully without them.
+- `github` sends all operations through the `gh` CLI. Install `gh` and log in. The `gh` authentication and rate limits apply.
+- `web_search` uses `EXA_API_KEY` or `PARALLEL_API_KEY`. Set `OMP_TOOLS_SEARCH_PROVIDER=exa|parallel` to force one provider.
+- `inspect_image` uses `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (with the optional `OPENAI_BASE_URL`), or `GEMINI_API_KEY`. Set `OMP_TOOLS_VISION_MODEL=provider/model` to select one model. Without a key, the tool attaches the image, and the session model does the analysis.
+- The `browser` tool first finds Obscura, then it finds Chrome, Chromium, Edge, or Brave. Set `OBSCURA_PATH` for Obscura. Set `OMP_TOOLS_BROWSER_ENGINE=obscura|chrome` to control the automatic search. Chrome paths use `CHROME_PATH` or `OMP_TOOLS_BROWSER`.
+- `todo` keeps one list per session. If the host gives a session id, the list persists to a snapshot file, and a resumed session recovers it.
 - SQLite uses `node:sqlite` → `bun:sqlite` → `sqlite3` CLI, whichever exists.
 - Optional tree-sitter grammars (python, rust, go, java, c, cpp, json, yaml) install as `optionalDependencies`; without them `ast_grep`/`ast_edit` cover js/ts/tsx/css/html.
 
@@ -130,3 +140,10 @@ npm test          # node --test test/smoke.test.ts
 ## License
 
 MIT
+
+## Evidence
+
+| Claim | Evidence |
+| --- | --- |
+| The browser tool first finds Obscura and then finds a Chromium browser. | `packages/omp-tools-core/src/tools/browser-launch.ts:45-83` |
+| The browser tool uses an isolated worker for `run` code. | `packages/omp-tools-core/src/tools/browser.ts:16` |

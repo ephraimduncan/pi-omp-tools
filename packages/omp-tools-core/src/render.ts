@@ -242,6 +242,13 @@ function lineText(R: RenderSupport, lines: string[]): Any {
 	return new R.Text(lines.join("\n"), 0, 0);
 }
 
+/** Colon-free header (`☑ Todo 11 tasks`) used where omp drops the `Title:` form. */
+function plainHeader(theme: Any, icon: string, title: string, meta: string[] = []): string {
+	const parts = [icon, fg(theme, "toolTitle", bold(theme, title))];
+	if (meta.length > 0) parts.push(fg(theme, "dim", meta.join(" · ")));
+	return parts.join(" ").replace(/\s*\n\s*/g, " ");
+}
+
 interface BoxSection {
 	label?: string;
 	rows: string[];
@@ -309,12 +316,12 @@ function stateOf(context: Any): RenderState | undefined {
  * Pending-call status line that disappears once the result renders — omp
  * replaces the `⏳ Tool: …` row with the framed result instead of stacking.
  */
-function pendingCall(R: RenderSupport, context: Any, text: string): Any {
+function pendingCall(R: RenderSupport, context: Any, lines: string[]): Any {
 	const state = stateOf(context);
 	return {
 		render(width: number): string[] {
 			if (state?.done) return [];
-			return [fit(R, text, Math.max(10, width || FALLBACK_WIDTH))];
+			return lines.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH)));
 		},
 		invalidate(): void {},
 	};
@@ -547,7 +554,7 @@ export function readRenderers(R: RenderSupport): Renderers {
 				title: "Read",
 				description: fg(theme, "accent", argText(args?.path)),
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -672,7 +679,7 @@ export function editRenderers(R: RenderSupport): Renderers {
 				title: "Edit",
 				description: fg(theme, "accent", label),
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -769,7 +776,7 @@ export function astEditRenderers(R: RenderSupport): Renderers {
 				description: fg(theme, "muted", collapsePattern(firstOp?.pat)),
 				meta: [`in ${paths}`],
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -936,7 +943,7 @@ export function searchRenderers(R: RenderSupport): Renderers {
 				description: fg(theme, "muted", argText(args?.pattern)),
 				meta,
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -979,7 +986,7 @@ export function astGrepRenderers(R: RenderSupport): Renderers {
 				description: fg(theme, "muted", collapsePattern(args?.pat)),
 				meta,
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -1012,7 +1019,7 @@ export function findRenderers(R: RenderSupport): Renderers {
 				title: "Find",
 				description: fg(theme, "accent", argText(args?.path ?? ".")),
 			});
-			return pendingCall(R, context, line);
+			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
 			markDone(context);
@@ -1050,6 +1057,352 @@ export function findRenderers(R: RenderSupport): Renderers {
 			});
 			if (hidden > 0) rows.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, hidden, expanded, "files"));
 			return lineText(R, [header, ...rows]);
+		},
+	};
+}
+
+/* --------------------------------- todo -------------------------------- */
+
+const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+
+function strike(theme: Any, text: string): string {
+	try {
+		if (typeof theme.strikethrough === "function") return theme.strikethrough(text);
+	} catch {
+		/* fall through */
+	}
+	return text;
+}
+
+function todoTaskRow(theme: Any, task: Any): string {
+	const content = String(task.content ?? "");
+	switch (task.status) {
+		case "completed":
+			return fg(theme, "success", `☑ ${strike(theme, content)}`);
+		case "in_progress":
+			return fg(theme, "accent", `☐ ${content}`);
+		case "dropped":
+			return fg(theme, "error", `☐ ${strike(theme, content)}`);
+		case "blocked":
+			return fg(theme, "warning", `☐ ${content}${task.reason ? ` (blocked: ${task.reason})` : " (blocked)"}`);
+		default:
+			return fg(theme, "dim", `☐ ${content}`);
+	}
+}
+
+export function todoRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const meta: string[] = [];
+			if (typeof args?.task === "string") meta.push(args.task);
+			else if (typeof args?.phase === "string") meta.push(args.phase);
+			const line = statusLine(theme, {
+				icon: statusIcon(theme, "pending"),
+				title: "Todo",
+				description: fg(theme, "muted", argText(args?.op)),
+				meta,
+			});
+			return pendingCall(R, context, [line]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			markDone(context);
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			if (context?.isError) return errorBox(R, theme, "Todo", argText(callArgs?.op), result);
+			const phases = details?.phases as Any[] | undefined;
+			if (!Array.isArray(phases)) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+
+			const total = phases.reduce((sum, phase) => sum + (phase.tasks?.length ?? 0), 0);
+			if (phases.length === 0 || total === 0) {
+				return lineText(R, [
+					`${fg(theme, "accent", "☑")} ${fg(theme, "toolTitle", bold(theme, "Todo"))} ${fg(theme, "muted", textOf(result))}`,
+				]);
+			}
+
+			const multi = phases.length > 1;
+			const rows: string[] = [];
+			phases.forEach((phase, index) => {
+				const tasks = (phase.tasks ?? []) as Any[];
+				const done = tasks.filter(task => task.status === "completed").length;
+				const active = tasks.some(task => task.status === "in_progress");
+				const named = callArgs?.phase === phase.name || tasks.some(task => task.content === callArgs?.task);
+				const numeral = ROMAN[index] ?? String(index + 1);
+				if (multi) {
+					// Untouched phases fold to one summary row when collapsed.
+					if (!expanded && !active && !named) {
+						rows.push(fg(theme, "dim", bold(theme, `${numeral}. ${phase.name}  ${done}/${tasks.length}`)));
+						return;
+					}
+					rows.push(fg(theme, "accent", bold(theme, `${numeral}. ${phase.name}`)));
+				}
+				const indent = multi ? "  " : "";
+				tasks.forEach((task, taskIndex) => {
+					const prefix = fg(theme, "dim", taskIndex === tasks.length - 1 ? TREE.last : TREE.branch);
+					rows.push(`${indent}${prefix}${todoTaskRow(theme, task)}`);
+				});
+			});
+			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_TREE_LINES);
+			const tail = moreLine(R, theme, hidden, expanded, "tasks");
+			if (tail) shown.push(tail);
+			return boxed(R, theme, {
+				header: plainHeader(theme, fg(theme, "accent", "☑"), "Todo", [`${total} task${total === 1 ? "" : "s"}`]),
+				sections: [{ rows: shown }],
+			});
+		},
+	};
+}
+
+/* -------------------------------- github ------------------------------- */
+
+const GITHUB_OP_TITLES: Record<string, string> = {
+	repo_view: "GitHub Repo",
+	file_read: "GitHub File",
+	pr_create: "GitHub PR Create",
+	pr_checkout: "GitHub PR Checkout",
+	pr_push: "GitHub PR Push",
+	search_issues: "GitHub Search Issues",
+	search_prs: "GitHub Search PRs",
+	search_code: "GitHub Search Code",
+	search_commits: "GitHub Search Commits",
+	search_repos: "GitHub Search Repos",
+	run_watch: "GitHub Run Watch",
+};
+
+function githubMeta(args: Any): string[] {
+	const meta: string[] = [];
+	if (typeof args?.repo === "string") meta.push(args.repo);
+	if (typeof args?.pr === "string") meta.push(`pr ${args.pr}`);
+	if (typeof args?.query === "string") meta.push(args.query);
+	if (typeof args?.path === "string") meta.push(args.path);
+	return meta;
+}
+
+export function githubRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const title = GITHUB_OP_TITLES[argText(args?.op)] ?? "GitHub";
+			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title, meta: githubMeta(args) });
+			return pendingCall(R, context, [line]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			markDone(context);
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			const title = GITHUB_OP_TITLES[argText(details?.op ?? callArgs?.op)] ?? "GitHub";
+			if (context?.isError) return errorBox(R, theme, title, githubMeta(callArgs).join(" "), result);
+			const lines = textOf(result).split("\n");
+			while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+			const icon = fg(theme, "accent", "⎇");
+			if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
+				return lineText(R, [statusLine(theme, { icon, title, description: fg(theme, "dim", "no output") })]);
+			}
+			if (lines.length === 1) {
+				return lineText(R, [statusLine(theme, { icon, title, description: fg(theme, "toolOutput", lines[0] as string) })]);
+			}
+			const rows = lines.map(line => fg(theme, "toolOutput", line));
+			const { shown, hidden } = bodyWindow(rows, expanded, 20);
+			const tail = moreLine(R, theme, hidden, expanded);
+			if (tail) shown.push(tail);
+			return boxed(R, theme, {
+				header: plainHeader(theme, icon, title, githubMeta(callArgs)),
+				sections: [{ rows: shown }],
+			});
+		},
+	};
+}
+
+/* ------------------------------ web_search ----------------------------- */
+
+export function webSearchRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const query = argText(args?.query);
+			const line = statusLine(theme, {
+				icon: statusIcon(theme, "pending"),
+				title: "Web Search",
+				description: fg(theme, "muted", query.length > 80 ? `${query.slice(0, 79)}…` : query),
+			});
+			return pendingCall(R, context, [line]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			markDone(context);
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			const query = typeof details?.query === "string" ? details.query : argText(callArgs?.query);
+			if (context?.isError) return errorBox(R, theme, "Web Search", query, result);
+			if (typeof details?.provider !== "string") return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+
+			const citations = (Array.isArray(details.citations) ? details.citations : []) as Any[];
+			const text = textOf(result);
+			const marker = text.indexOf("\nSources:");
+			const answer = (marker >= 0 ? text.slice(0, marker) : text).trimEnd();
+			const answerRows = answer.split("\n").map(line => fg(theme, "toolOutput", line));
+			const { shown, hidden } = bodyWindow(answerRows, expanded, COLLAPSED_CODE_LINES);
+			const tail = moreLine(R, theme, hidden, expanded);
+			if (tail) shown.push(tail);
+
+			const sourceCap = expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS;
+			const sourceRows = citations.slice(0, sourceCap).map((citation, index) => {
+				const last = index === Math.min(citations.length, sourceCap) - 1 && citations.length <= sourceCap;
+				let domain = "";
+				try {
+					domain = new URL(String(citation.url ?? "")).hostname.replace(/^www\./, "");
+				} catch {
+					/* keep empty */
+				}
+				const label = fg(theme, "accent", String(citation.title ?? citation.url ?? ""));
+				const suffix = domain ? ` ${fg(theme, "dim", `(${domain})`)}` : "";
+				return `${fg(theme, "dim", last ? TREE.last : TREE.branch)}${label}${suffix}`;
+			});
+			if (citations.length > sourceCap) {
+				sourceRows.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, citations.length - sourceCap, expanded, "sources"));
+			}
+			if (sourceRows.length === 0) sourceRows.push(fg(theme, "muted", "No sources returned"));
+
+			const ok = citations.length > 0;
+			return boxed(R, theme, {
+				header: statusLine(theme, {
+					icon: ok ? fg(theme, "accent", "⌕") : statusIcon(theme, "warning"),
+					title: "Web Search",
+					description: fg(theme, "muted", details.provider),
+					meta: [`${citations.length} source${citations.length === 1 ? "" : "s"}`],
+				}),
+				sections: [
+					{ rows: [`${fg(theme, "muted", "Query:")} ${query}`] },
+					{ label: "Answer", rows: shown },
+					{ label: "Sources", rows: sourceRows },
+					{ label: "Metadata", rows: [`${fg(theme, "muted", "Provider:")} ${details.provider}`] },
+				],
+			});
+		},
+	};
+}
+
+/* ----------------------------- inspect_image --------------------------- */
+
+export function inspectImageRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const question = argText(args?.question);
+			const lines = [
+				statusLine(theme, {
+					icon: statusIcon(theme, "pending"),
+					title: "Inspect",
+					description: fg(theme, "accent", argText(args?.path)),
+				}),
+				`${fg(theme, "dim", TREE.last)}${fg(theme, "muted", "Question:")} ${question.length > 100 ? `${question.slice(0, 99)}…` : question}`,
+			];
+			return pendingCall(R, context, lines);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			markDone(context);
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			const path = typeof details?.imagePath === "string" ? details.imagePath : argText(callArgs?.path);
+			if (context?.isError) return errorBox(R, theme, "Inspect", path, result);
+			const meta: string[] = [];
+			if (typeof details?.model === "string") meta.push(details.model);
+			if (typeof details?.mimeType === "string") meta.push(details.mimeType);
+			const header = statusLine(theme, {
+				icon: fg(theme, "accent", "🖼"),
+				title: "Inspect",
+				description: fg(theme, "accent", path) + (meta.length > 0 ? fg(theme, "dim", ` · ${meta.join(" · ")}`) : ""),
+			});
+			const parts = (result?.content ?? []) as Any[];
+			if (parts.some((part: Any) => part.type === "image")) {
+				// No vision provider: the tool passed the image through for the model.
+				return lineText(R, [header, fg(theme, "dim", "image passed through to the model")]);
+			}
+			const question = argText(callArgs?.question);
+			const rows = [
+				`${fg(theme, "muted", "Question:")} ${fg(theme, "accent", question.length > 100 ? `${question.slice(0, 99)}…` : question)}`,
+				"",
+				...textOf(result)
+					.split("\n")
+					.map(line => fg(theme, "toolOutput", line)),
+			];
+			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES + 2);
+			const tail = moreLine(R, theme, hidden, expanded);
+			if (tail) shown.push(tail);
+			return boxed(R, theme, { header, sections: [{ rows: shown }] });
+		},
+	};
+}
+
+/* -------------------------------- browser ------------------------------ */
+
+function browserTitle(action: string, args: Any): string {
+	const name = typeof args?.name === "string" ? args.name : "main";
+	if (action === "open") return `Open tab "${name}"`;
+	if (action === "close") {
+		if (args?.all === true) return `Close all tabs${args?.kill === true ? " (kill)" : ""}`;
+		return `Close tab "${name}"`;
+	}
+	return `tab "${name}"`;
+}
+
+export function browserRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const action = argText(args?.action);
+			if (action === "run") {
+				const state = stateOf(context);
+				const header = `${statusIcon(theme, "running")} ${fg(theme, "toolTitle", bold(theme, browserTitle(action, args)))}`;
+				const code = typeof args?.code === "string" ? args.code : "";
+				return {
+					render(width: number): string[] {
+						if (state?.done) return [];
+						const rows = highlight(R, code.replace(/\n$/, ""), "javascript", theme);
+						const capped = rows.slice(0, COLLAPSED_CODE_LINES);
+						if (rows.length > capped.length) capped.push(fg(theme, "dim", `… ${rows.length - capped.length} more lines`));
+						return boxed(R, theme, { header, sections: [{ rows: capped }] }).render(width);
+					},
+					invalidate(): void {},
+				};
+			}
+			const meta: string[] = [];
+			if (typeof args?.url === "string") meta.push(args.url);
+			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title: browserTitle(action, args), meta });
+			return pendingCall(R, context, [line]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			markDone(context);
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			const action = argText(details?.action ?? callArgs?.action);
+			const title = browserTitle(action, callArgs);
+			const lines = textOf(result)
+				.split("\n")
+				.filter(line => line.length > 0);
+			if (context?.isError) {
+				return lineText(R, [
+					plainHeader(theme, statusIcon(theme, "error"), title),
+					...lines.map(line => fg(theme, "error", line)),
+				]);
+			}
+			if (action !== "run") {
+				const meta: string[] = [];
+				if (typeof details?.url === "string") meta.push(details.url);
+				return lineText(R, [
+					plainHeader(theme, fg(theme, "accent", "🌐"), title, meta),
+					...lines.map(line => fg(theme, "toolOutput", line)),
+				]);
+			}
+			const code = typeof callArgs?.code === "string" ? callArgs.code : "";
+			const codeRowsShown = highlight(R, code.replace(/\n$/, ""), "javascript", theme);
+			const { shown, hidden } = bodyWindow(codeRowsShown, expanded, COLLAPSED_CODE_LINES);
+			const codeTail = moreLine(R, theme, hidden, expanded);
+			if (codeTail) shown.push(codeTail);
+			const outputRows = lines.map(line => fg(theme, "toolOutput", line));
+			const outputWindow = bodyWindow(outputRows, expanded, COLLAPSED_LIST_ITEMS);
+			const outputTail = moreLine(R, theme, outputWindow.hidden, expanded);
+			if (outputTail) outputWindow.shown.push(outputTail);
+			const sections: BoxSection[] = [{ rows: shown }];
+			if (outputWindow.shown.length > 0) sections.push({ label: "Output", rows: outputWindow.shown });
+			return boxed(R, theme, {
+				header: `${statusIcon(theme, "done")} ${fg(theme, "toolTitle", bold(theme, title))}`,
+				sections,
+			});
 		},
 	};
 }

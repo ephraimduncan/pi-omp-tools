@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { Type } from "typebox";
 import { ToolError, textResult, type PiApi, type ToolCtx, type ToolResult } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { githubRenderers, loadRenderSupport } from "../render.ts";
 import {
 	buildGhArgs,
 	buildSearchDateQualifier,
@@ -123,7 +124,9 @@ export async function executeGithub(params: GithubParams, ctx?: ToolCtx, signal?
 export async function registerGithub(pi: PiApi): Promise<void> {
 	registeredTools.add("github");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...githubRenderers(support) } : {}),
 		name: "github",
 		label: "GitHub",
 		description: GITHUB_DESCRIPTION,

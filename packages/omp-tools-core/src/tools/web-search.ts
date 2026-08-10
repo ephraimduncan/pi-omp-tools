@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { ToolError, textResult, type PiApi, type ToolCtx, type ToolResult } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { loadRenderSupport, webSearchRenderers } from "../render.ts";
 
 export const WEB_SEARCH_DESCRIPTION = `Searches the web for up-to-date information beyond knowledge cutoff.
 
@@ -196,7 +197,9 @@ export function parseParallelResponse(payload: unknown): SearchData {
 export async function registerWebSearch(pi: PiApi): Promise<void> {
 	registeredTools.add("web_search");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...webSearchRenderers(support) } : {}),
 		name: "web_search",
 		label: "Web Search",
 		description: WEB_SEARCH_DESCRIPTION,

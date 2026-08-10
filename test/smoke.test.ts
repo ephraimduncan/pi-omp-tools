@@ -463,6 +463,98 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	assert.match(readOut, /╰─+╯/);
 });
 
+test("renderers: todo box, web_search sections, github inline line", async () => {
+	const { todoRenderers, webSearchRenderers, githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => text,
+		strikethrough: (text: string) => `~${text}~`,
+	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(80).join("\n") : (boxLike.text ?? "");
+	};
+
+	const todo = todoRenderers(R);
+	const todoOut = renderLines(
+		todo.renderResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					phases: [
+						{ name: "Setup", tasks: [{ content: "Scaffold", status: "completed" }] },
+						{ name: "Build", tasks: [{ content: "Wire tools", status: "in_progress" }, { content: "Docs", status: "pending" }] },
+						{ name: "Later", tasks: [{ content: "Polish", status: "pending" }] },
+					],
+				},
+			},
+			{ expanded: false },
+			theme,
+			{ args: { op: "start", task: "Wire tools" }, state: {} },
+		),
+	);
+	assert.match(todoOut, /╭─── ☑ Todo 4 tasks/);
+	assert.match(todoOut, /I\. Setup {2}1\/1/); // untouched phase folds to a summary row
+	assert.match(todoOut, /II\. Build/);
+	assert.match(todoOut, /├─ ☐ Wire tools/);
+	assert.match(todoOut, /└─ ☐ Docs/);
+	assert.match(todoOut, /III\. Later {2}0\/1/);
+
+	const search = webSearchRenderers(R);
+	const searchOut = renderLines(
+		search.renderResult(
+			{
+				content: [{ type: "text", text: "Answer line one.\n\nSources:\n- Example" }],
+				details: {
+					provider: "Exa",
+					query: "tool ui",
+					citations: [{ title: "Example", url: "https://www.example.com/a" }],
+				},
+			},
+			{ expanded: false },
+			theme,
+			{ args: { query: "tool ui" }, state: {} },
+		),
+	);
+	assert.match(searchOut, /╭─── ⌕ Web Search: Exa 1 source/);
+	assert.match(searchOut, /Query: tool ui/);
+	assert.match(searchOut, /├─── Answer ─/);
+	assert.match(searchOut, /Answer line one\./);
+	assert.match(searchOut, /├─── Sources ─/);
+	assert.match(searchOut, /└─ Example \(example\.com\)/);
+	assert.match(searchOut, /Provider: Exa/);
+
+	const github = githubRenderers(R);
+	const oneLine = renderLines(
+		github.renderResult(
+			{ content: [{ type: "text", text: "Pushed 1 commit to feat/x" }], details: { op: "pr_push" } },
+			{ expanded: false },
+			theme,
+			{ args: { op: "pr_push" }, state: {} },
+		),
+	);
+	assert.equal(oneLine.includes("╭"), false); // single line stays inline, no box
+	assert.match(oneLine, /⎇ GitHub PR Push: Pushed 1 commit to feat\/x/);
+	const boxedOut = renderLines(
+		github.renderResult(
+			{ content: [{ type: "text", text: "# repo\n\nline two" }], details: { op: "repo_view" } },
+			{ expanded: false },
+			theme,
+			{ args: { op: "repo_view", repo: "a/b" }, state: {} },
+		),
+	);
+	assert.match(boxedOut, /╭─── ⎇ GitHub Repo a\/b/);
+	assert.match(boxedOut, /line two/);
+});
+
 test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", async () => {
 	const dir = await makeTempDir();
 	await fs.mkdir(path.join(dir, "src"), { recursive: true });

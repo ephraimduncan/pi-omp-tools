@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import { sessionId, ToolError, textResult, type PiApi, type ToolCtx, type ToolResult } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { loadRenderSupport, todoRenderers } from "../render.ts";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "dropped" | "blocked";
 export type TodoOp = "init" | "start" | "done" | "drop" | "block" | "unblock" | "rm" | "append" | "view";
@@ -116,10 +117,12 @@ export async function executeTodo(params: TodoParams, ctx?: ToolCtx, _signal?: A
 	return result(next, false);
 }
 
-export function registerTodo(pi: PiApi): void {
+export async function registerTodo(pi: PiApi): Promise<void> {
 	registeredTools.add("todo");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...todoRenderers(support) } : {}),
 		name: "todo",
 		label: "Todo",
 		description: TODO_DESCRIPTION,

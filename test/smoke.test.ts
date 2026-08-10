@@ -394,7 +394,7 @@ test("edit registration carries replayBuiltInToolName and display path arg", asy
 	assert.equal(prepared?.path, "src/a.ts");
 });
 
-test("renderers: fake host produces colored bodies", async () => {
+test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	const { editRenderers, searchRenderers, readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
 	class FakeText {
 		text: string;
@@ -405,51 +405,344 @@ test("renderers: fake host produces colored bodies", async () => {
 	const R = {
 		Text: FakeText as never,
 		Container: FakeText as never,
-		renderDiff: (diff: string) => diff.split("\n").map(line => (line.startsWith("+") ? `G${line}` : line.startsWith("-") ? `R${line}` : line)).join("\n"),
 	} as never;
 	const theme = {
 		fg: (_c: string, text: string) => text,
 		bold: (text: string) => text,
 		inverse: (text: string) => `<${text}>`,
 	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(80).join("\n") : (boxLike.text ?? "");
+	};
 
 	const edit = editRenderers(R);
-	const editOut = edit.renderResult(
-		{ details: { sections: [{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] }] } },
-		{ expanded: false },
-		theme,
-		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(editOut.text, /a\.ts #AAAA/);
-	assert.match(editOut.text, /R-1 old/);
-	assert.match(editOut.text, /G\+1 new/);
-	assert.match(editOut.text, /⚠ careful/);
-
-	const search = searchRenderers(R);
-	const searchOut = search.renderResult(
+	const editComponent = edit.renderResult(
 		{
 			details: {
-				pattern: "needle",
-				files: [{ path: "b.ts", tag: "BBBB", rows: [{ n: 3, text: "a needle here", isMatch: true }], more: 0 }],
-				summary: "1 matches in 1 files",
+				sections: [
+					{ path: "old.ts", op: "delete" },
+					{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] },
+				],
 			},
 		},
 		{ expanded: false },
 		theme,
 		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(searchOut.text, /b\.ts #BBBB/);
-	assert.match(searchOut.text, /3 a <needle> here/);
+	) as { render: (width: number) => string[] };
+	const editLines = editComponent.render(80);
+	const editOut = editLines.join("\n");
+	assert.match(editOut, /╭─── ✎ Edit: 🟦 a\.ts#AAAA ⟦\+1\/-1⟧/);
+	assert.match(editOut, / {2}-1│<old>/);
+	assert.match(editOut, /⚠ careful/);
+	assert.equal(editLines[0], "");
+	assert.match(editLines[1] as string, /🗑 Delete: old\.ts/);
+	assert.match(editLines[2] as string, /^╭/);
+	assert.match(editLines.at(-1) as string, /^╰/);
+	assert.match(editOut, /╰─+╯/);
+
+	const search = searchRenderers(R);
+	const searchOut = renderLines(
+		search.renderResult(
+			{
+				details: {
+					pattern: "needle",
+					files: [{ path: "b.ts", tag: "BBBB", rows: [{ n: 3, text: "a needle here", isMatch: true }], more: 0 }],
+					summary: "1 matches in 1 files",
+				},
+			},
+			{ expanded: false },
+			theme,
+			{},
+		),
+	);
+	assert.match(searchOut, /🔍 Search: needle 1 match · 1 file/);
+	assert.match(searchOut, /└─ b\.ts#BBBB/);
+	assert.match(searchOut, /\*3│a <needle> here/);
 
 	const read = readRenderers(R);
-	const readOut = read.renderResult(
-		{ details: { kind: "text", path: "c.ts", tag: "CCCC", rows: [{ n: 1, text: "const x = 1;" }] } },
+	const readOut = renderLines(
+		read.renderResult(
+			{ details: { kind: "text", path: "c.ts", tag: "CCCC", rows: [{ n: 1, text: "const x = 1;" }] } },
+			{ expanded: false },
+			theme,
+			{},
+		),
+	);
+	assert.match(readOut, /╭─── 🟦 • Read: c\.ts#CCCC · 1 line /);
+	assert.match(readOut, / 1 const x = 1;/);
+	assert.match(readOut, /╰─+╯/);
+});
+
+test("renderers: todo box, web_search sections, github inline line", async () => {
+	const { todoRenderers, webSearchRenderers, githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => text,
+		strikethrough: (text: string) => `~${text}~`,
+	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(80).join("\n") : (boxLike.text ?? "");
+	};
+
+	const todo = todoRenderers(R);
+	const todoOut = renderLines(
+		todo.renderResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					phases: [
+						{ name: "Setup", tasks: [{ content: "Scaffold", status: "completed" }] },
+						{ name: "Build", tasks: [{ content: "Wire tools", status: "in_progress" }, { content: "Docs", status: "pending" }] },
+						{ name: "Later", tasks: [{ content: "Polish", status: "pending" }] },
+					],
+				},
+			},
+			{ expanded: false },
+			theme,
+			{ args: { op: "start", task: "Wire tools" }, state: {} },
+		),
+	);
+	assert.match(todoOut, /╭─── ☑ Todo 4 tasks/);
+	assert.match(todoOut, /I\. Setup {2}1\/1/); // untouched phase folds to a summary row
+	assert.match(todoOut, /II\. Build/);
+	assert.match(todoOut, /├─ ☐ Wire tools/);
+	assert.match(todoOut, /└─ ☐ Docs/);
+	assert.match(todoOut, /III\. Later {2}0\/1/);
+
+	const search = webSearchRenderers(R);
+	const searchOut = renderLines(
+		search.renderResult(
+			{
+				content: [{ type: "text", text: "Answer line one.\n\nSources:\n- Example" }],
+				details: {
+					provider: "Exa",
+					query: "tool ui",
+					citations: [{ title: "Example", url: "https://www.example.com/a" }],
+				},
+			},
+			{ expanded: false },
+			theme,
+			{ args: { query: "tool ui" }, state: {} },
+		),
+	);
+	assert.match(searchOut, /╭─── ⌕ Web Search: Exa 1 source/);
+	assert.match(searchOut, /Query: tool ui/);
+	assert.match(searchOut, /├─── Answer ─/);
+	assert.match(searchOut, /Answer line one\./);
+	assert.match(searchOut, /├─── Sources ─/);
+	assert.match(searchOut, /└─ Example \(example\.com\)/);
+	assert.match(searchOut, /Provider: Exa/);
+
+	const github = githubRenderers(R);
+	const oneLine = renderLines(
+		github.renderResult(
+			{ content: [{ type: "text", text: "Pushed 1 commit to feat/x" }], details: { op: "pr_push" } },
+			{ expanded: false },
+			theme,
+			{ args: { op: "pr_push" }, state: {} },
+		),
+	);
+	assert.equal(oneLine.includes("╭"), false); // single line stays inline, no box
+	assert.match(oneLine, /⎇ GitHub PR Push: Pushed 1 commit to feat\/x/);
+	const boxedOut = renderLines(
+		github.renderResult(
+			{ content: [{ type: "text", text: "# repo\n\nline two" }], details: { op: "repo_view" } },
+			{ expanded: false },
+			theme,
+			{ args: { op: "repo_view", repo: "a/b" }, state: {} },
+		),
+	);
+	assert.match(boxedOut, /╭─── ⎇ GitHub Repo a\/b/);
+	assert.match(boxedOut, /line two/);
+});
+
+test("renderers: github structured layouts (repo box, pr box, search rows, run watch)", async () => {
+	const { githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => text,
+	};
+	const renderLines = (component: unknown): string => {
+		const boxLike = component as { render?: (width: number) => string[]; text?: string };
+		return boxLike.render ? boxLike.render(90).join("\n") : (boxLike.text ?? "");
+	};
+	const github = githubRenderers(R);
+	const call = (details: Record<string, unknown>, args: Record<string, unknown>) =>
+		renderLines(github.renderResult({ content: [{ type: "text", text: "fallback text" }], details }, { expanded: false }, theme, { args, state: {} }));
+
+	const repoOut = call(
+		{
+			op: "repo_view",
+			data: {
+				nameWithOwner: "a/b",
+				description: "demo repo",
+				url: "https://github.com/a/b",
+				visibility: "PUBLIC",
+				stargazerCount: 3,
+				forkCount: 1,
+				primaryLanguage: { name: "TypeScript" },
+				defaultBranchRef: { name: "main" },
+			},
+		},
+		{ op: "repo_view" },
+	);
+	assert.match(repoOut, /╭─── ⎇ a\/b ⟦PUBLIC⟧ ★3 TypeScript · main/);
+	assert.match(repoOut, /demo repo/);
+	assert.match(repoOut, /Forks\s+1/);
+
+	const prOut = call(
+		{
+			op: "pr_view",
+			data: {
+				number: 7,
+				title: "add pagination",
+				state: "OPEN",
+				author: { login: "lin" },
+				headRefName: "feat/pages",
+				baseRefName: "main",
+				body: "body first line",
+				files: [{ path: "src/a.ts", additions: 5, deletions: 2 }],
+				comments: [{ author: { login: "ada" }, body: "ship it" }],
+			},
+		},
+		{ op: "pr_view", pr: "7" },
+	);
+	assert.match(prOut, /╭─── ⎇ PR #7 add pagination ⟦OPEN⟧/);
+	assert.match(prOut, /feat\/pages → main · @lin/);
+	assert.match(prOut, /├─── Body ─/);
+	assert.match(prOut, /├─── Files 1 · \+5\/-2 ─/);
+	assert.match(prOut, /└─ 🟦 src\/a\.ts\s+\+5\/-2/);
+	assert.match(prOut, /├─── Comments 1 ─/);
+	assert.match(prOut, /└─ @ada · ship it/);
+
+	const searchOut = call(
+		{
+			op: "search_issues",
+			data: { items: [{ number: 9, title: "bug in read", state: "open", user: { login: "sam" } }] },
+		},
+		{ op: "search_issues", query: "read" },
+	);
+	assert.equal(searchOut.includes("╭"), false); // search stays frameless
+	assert.match(searchOut, /🔍 GitHub Search Issues: read 1 result/);
+	assert.match(searchOut, /└─ #9 bug in read ⟦OPEN⟧ @sam/);
+
+	const watchOut = call(
+		{
+			op: "run_watch",
+			state: "completed",
+			runs: [
+				{
+					workflowName: "CI",
+					status: "completed",
+					conclusion: "failure",
+					jobs: [{ name: "test", conclusion: "failure" }],
+				},
+			],
+			failedLog: "boom",
+		},
+		{ op: "run_watch" },
+	);
+	assert.match(watchOut, /╭─── ⎇ Run Watch CI ⟦FAILURE⟧/);
+	assert.match(watchOut, /└─ ✘ test/);
+	assert.match(watchOut, /├─── Failed log ─/);
+	assert.match(watchOut, /boom/);
+
+	// Single-run details (runDetails shape, no runs array) keep the run identity in the header.
+	const singleRunOut = call(
+		{
+			op: "run_watch",
+			state: "completed",
+			workflowName: "CI",
+			headBranch: "main",
+			headSha: "515f604aa11",
+			status: "completed",
+			conclusion: "success",
+			jobs: [{ name: "build", conclusion: "success" }],
+		},
+		{ op: "run_watch" },
+	);
+	assert.match(singleRunOut, /╭─── ⎇ Run Watch CI ⟦SUCCESS⟧ main · 515f604/);
+	assert.match(singleRunOut, /└─ ✔ build/);
+
+	// Code search renders every text-match fragment under the repo:path row.
+	const codeOut = call(
+		{
+			op: "search_code",
+			data: {
+				items: [
+					{
+						path: "src/register.ts",
+						repository: { full_name: "a/b" },
+						text_matches: [{ fragment: "renderShell: \"self\"" }, { fragment: "readRenderers(support)" }],
+					},
+				],
+			},
+		},
+		{ op: "search_code", query: "renderShell" },
+	);
+	assert.match(codeOut, /🔍 GitHub Search Code: renderShell 1 result/);
+	assert.match(codeOut, /└─ a\/b:src\/register\.ts/);
+	assert.match(codeOut, /renderShell: "self"/);
+	assert.match(codeOut, /⋮/); // fragment separator
+	assert.match(codeOut, /readRenderers\(support\)/);
+
+	// Repo topics come from the repositoryTopics field.
+	const topicsOut = call(
+		{ op: "repo_view", data: { nameWithOwner: "a/b", repositoryTopics: [{ name: "pi" }, { topic: { name: "tui" } }] } },
+		{ op: "repo_view" },
+	);
+	assert.match(topicsOut, /Topics\s+pi, tui/);
+
+	// The next tool supplies the gap; the host supplies the gap before prose.
+	const github2 = githubRenderers(R);
+	const boxComponent = github2.renderResult(
+		{ content: [{ type: "text", text: "unused" }], details: { op: "repo_view", data: { nameWithOwner: "a/b" } } },
 		{ expanded: false },
 		theme,
-		{},
-	) as InstanceType<typeof FakeText>;
-	assert.match(readOut.text, /c\.ts #CCCC/);
-	assert.match(readOut.text, /1 const x = 1;/);
+		{ args: { op: "repo_view" }, state: {} },
+	) as { render: (width: number) => string[] };
+	const boxLines = boxComponent.render(90);
+	assert.equal(boxLines[0], "");
+	assert.match(boxLines[1] as string, /^╭/);
+	assert.match(boxLines.at(-1) as string, /^╰/);
+
+	const inlineComponent = github2.renderResult(
+		{ content: [{ type: "text", text: "Pushed 1 commit" }], details: { op: "pr_push" } },
+		{ expanded: false },
+		theme,
+		{ args: { op: "pr_push" }, state: {} },
+	) as { text: string };
+	assert.equal(inlineComponent.text.startsWith("\n"), true);
+	assert.equal(inlineComponent.text.endsWith("\n"), false);
+
+	const pendingComponent = github2.renderCall({ op: "repo_view", repo: "a/b" }, theme, { state: {} }) as {
+		render: (width: number) => string[];
+	};
+	const pendingLines = pendingComponent.render(90);
+	assert.equal(pendingLines[0], "");
+	assert.notEqual(pendingLines.at(-1), "");
+
+	// Ops without structured details keep the fallback text rendering.
+	const fallbackOut = call({ op: "repo_view" }, { op: "repo_view", repo: "a/b" });
+	assert.match(fallbackOut, /⎇ GitHub Repo: fallback text/);
 });
 
 test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", async () => {

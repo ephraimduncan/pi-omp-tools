@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { ToolError, type ToolCtx, type ToolResult } from "../host.ts";
 import type { PiApi } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { inspectImageRenderers, loadRenderSupport } from "../render.ts";
 
 export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -166,7 +167,9 @@ export async function executeInspectImage(
 export async function registerInspectImage(pi: PiApi): Promise<void> {
 	registeredTools.add("inspect_image");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...inspectImageRenderers(support) } : {}),
 		name: "inspect_image",
 		label: "InspectImage",
 		description: INSPECT_IMAGE_DESCRIPTION,

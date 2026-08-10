@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { Type } from "typebox";
 import { ToolError, textResult, type PiApi, type ToolCtx, type ToolResult } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { githubRenderers, loadRenderSupport } from "../render.ts";
 import {
 	buildGhArgs,
 	buildSearchDateQualifier,
@@ -108,12 +109,25 @@ export async function executeGithub(params: GithubParams, ctx?: ToolCtx, signal?
 	const args = firstArgs(buildGhArgs(params.op, params, repoCtx));
 	if (params.op === "file_read" || (params.op === "pr_diff" && params.path === "all")) {
 		const output = await gh(args, cwd, signal);
-		return textResult(output.stdout, { op: params.op, repo: params.repo ?? repoCtx.repo, output: output.stdout });
+		return textResult(output.stdout, {
+			op: params.op,
+			repo: params.repo ?? repoCtx.repo,
+			path: params.path,
+			branch: params.branch,
+			output: output.stdout,
+		});
 	}
 	if (params.op === "pr_create") {
 		const output = await gh(args, cwd, signal);
 		const url = output.stdout.split("\n").map(row => row.trim()).find(row => row.startsWith("https://github.com/"));
-		return textResult(url ? `Created pull request: ${url}` : output.stdout.trim(), { op: params.op, url });
+		return textResult(url ? `Created pull request: ${url}` : output.stdout.trim(), {
+			op: params.op,
+			url,
+			title: params.title,
+			head: params.head,
+			base: params.base,
+			draft: params.draft === true,
+		});
 	}
 
 	const data = await ghJson<unknown>(args, cwd, signal);
@@ -123,7 +137,9 @@ export async function executeGithub(params: GithubParams, ctx?: ToolCtx, signal?
 export async function registerGithub(pi: PiApi): Promise<void> {
 	registeredTools.add("github");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...githubRenderers(support) } : {}),
 		name: "github",
 		label: "GitHub",
 		description: GITHUB_DESCRIPTION,

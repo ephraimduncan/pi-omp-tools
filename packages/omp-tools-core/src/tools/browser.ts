@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import { sessionId, ToolError, textResult, type PiApi, type ToolCtx, type ToolResult } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
+import { browserRenderers, loadRenderSupport } from "../render.ts";
 import { CdpClient } from "./browser-cdp.ts";
 import { launchBrowser, resolveCdpUrl, type BrowserProcess } from "./browser-launch.ts";
 import { runBrowserCode } from "./browser-run.ts";
@@ -83,7 +84,9 @@ export async function executeBrowser(params: BrowserParams, ctx?: ToolCtx, signa
 export async function registerBrowser(pi: PiApi): Promise<void> {
 	registeredTools.add("browser");
 	ensurePromptContract(pi);
+	const support = await loadRenderSupport();
 	pi.registerTool({
+		...(support ? { renderShell: "self", ...browserRenderers(support) } : {}),
 		name: "browser",
 		label: "Browser",
 		description: BROWSER_DESCRIPTION,

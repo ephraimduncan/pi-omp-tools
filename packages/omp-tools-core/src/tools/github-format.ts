@@ -224,6 +224,10 @@ export function runDetails(run: GhRun, state: "watching" | "completed", failedLo
 	return {
 		state,
 		runId: run.databaseId,
+		workflowName: run.workflowName,
+		displayTitle: run.displayTitle,
+		headBranch: run.headBranch,
+		headSha: run.headSha,
 		status: run.status,
 		conclusion: run.conclusion,
 		url: run.url,

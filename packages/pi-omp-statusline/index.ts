@@ -3,6 +3,7 @@
  *
  * Clones omp's signature input area:
  *  - the editor is a full rounded box (omp style), not a bare top rule
+ *  - no "> " prompt prefix on the input line (omp's editor is bare)
  *  - the status line renders INSIDE the editor's top border, exactly like
  *    omp's setTopBorderProvider wiring: π · model+thinking · path · git
  *    (*unstaged +staged ?untracked) · context% · cost, gap-filled with
@@ -165,9 +166,10 @@ export default function ompChrome(pi: Any): void {
 		const BORDER_GAP_FG = "\x1b[38;2;23;143;185m"; // #178fb9
 
 		class OmpEditor extends BaseEditor {
-			// biome-ignore lint/complexity/noUselessConstructor: keeps typed ctor over `any` base
 			constructor(tui: Any, theme: Any, keybindings: Any, options?: Any) {
-				super(tui, theme, keybindings, options);
+				// omp's input has no "> " prompt prefix (prime's CustomEditor defaults
+				// to one). Bash-mode "!"/"!!" prefixes still apply via getBashPromptInfo.
+				super(tui, theme, keybindings, { ...options, promptPrefix: "" });
 			}
 
 			render(width: number): string[] {

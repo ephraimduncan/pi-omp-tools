@@ -238,8 +238,9 @@ function bodyWindow(rows: string[], expanded: boolean, collapsedCap: number): { 
 
 /* ------------------------------ components ----------------------------- */
 
+/** Top/bottom-margined text rows: self-shell tools own the vertical padding pi's default shell provides. */
 function lineText(R: RenderSupport, lines: string[]): Any {
-	return new R.Text(lines.join("\n"), 0, 0);
+	return new R.Text(["", ...lines, ""].join("\n"), 0, 0);
 }
 
 /** Colon-free header (`☑ Todo 11 tasks`) used where omp drops the `Title:` form. */
@@ -268,7 +269,7 @@ function boxed(R: RenderSupport, theme: Any, opts: { header: string; borderColor
 			const w = Math.max(MIN_BOX_WIDTH, width || FALLBACK_WIDTH);
 			if (w === cachedWidth) return cached;
 			const inner = w - 2;
-			const lines: string[] = [];
+			const lines: string[] = [""];
 			const header = fit(R, opts.header.replace(/\s*\n\s*/g, " "), Math.max(1, inner - 7));
 			const headFill = Math.max(0, inner - 5 - vw(R, header));
 			lines.push(border(BOX.tl + BOX.h.repeat(3)) + ` ${header} ` + border(BOX.h.repeat(headFill) + BOX.tr));
@@ -290,7 +291,7 @@ function boxed(R: RenderSupport, theme: Any, opts: { header: string; borderColor
 				}
 				first = false;
 			}
-			lines.push(border(BOX.bl + BOX.h.repeat(inner) + BOX.br));
+			lines.push(border(BOX.bl + BOX.h.repeat(inner) + BOX.br), "");
 			cachedWidth = w;
 			cached = lines;
 			return lines;
@@ -321,7 +322,7 @@ function pendingCall(R: RenderSupport, context: Any, lines: string[]): Any {
 	return {
 		render(width: number): string[] {
 			if (state?.done) return [];
-			return lines.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH)));
+			return ["", ...lines.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ""];
 		},
 		invalidate(): void {},
 	};
@@ -749,7 +750,7 @@ export function editRenderers(R: RenderSupport): Renderers {
 			if (inline.length === 0) return box;
 			return {
 				render(width: number): string[] {
-					return [...inline.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ...box.render(width)];
+					return ["", ...inline.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ...box.render(width)];
 				},
 				invalidate(): void {
 					box.invalidate();
@@ -1115,7 +1116,7 @@ export function todoRenderers(R: RenderSupport): Renderers {
 			const total = phases.reduce((sum, phase) => sum + (phase.tasks?.length ?? 0), 0);
 			if (phases.length === 0 || total === 0) {
 				return lineText(R, [
-					`${fg(theme, "accent", "☑")} ${fg(theme, "toolTitle", bold(theme, "Todo"))} ${fg(theme, "muted", textOf(result))}`,
+					`${fg(theme, "accent", "☑")} ${fg(theme, "toolTitle", bold(theme, "Todo"))} ${fg(theme, "muted", textOf(result).replace(/^Todo /, ""))}`,
 				]);
 			}
 
@@ -1222,18 +1223,10 @@ function githubMeta(args: Any): string[] {
 	return meta;
 }
 
-/** Dim-label field rows, two pairs per row (`Forks  0   Permission  ADMIN`). */
+/** Dim-label field rows, one pair per row — narrow panes truncate values, never whole facts. */
 function fieldGrid(theme: Any, pairs: Array<[string, string]>): string[] {
 	const labelWidth = Math.max(...pairs.map(pair => pair[0].length));
-	const cell = (pair: [string, string]) => `${fg(theme, "dim", pair[0].padEnd(labelWidth))}  ${pair[1]}`;
-	const rows: string[] = [];
-	for (let i = 0; i < pairs.length; i += 2) {
-		const left = pairs[i] as [string, string];
-		const right = pairs[i + 1];
-		const leftCell = cell(left);
-		rows.push(right ? `${leftCell}${" ".repeat(Math.max(2, 44 - stripAnsi(leftCell).length))}${cell(right)}` : leftCell);
-	}
-	return rows;
+	return pairs.map(pair => `${fg(theme, "dim", pair[0].padEnd(labelWidth))}  ${pair[1]}`);
 }
 
 function statPair(theme: Any, additions: unknown, deletions: unknown): string {
@@ -1441,7 +1434,19 @@ function jobDuration(job: Any): string {
 function ghRunWatchBox(R: RenderSupport, theme: Any, details: Any, expanded: boolean): Any {
 	const runs: Any[] = Array.isArray(details.runs)
 		? details.runs
-		: [{ status: details.status, conclusion: details.conclusion, jobs: details.jobs, url: details.url, databaseId: details.runId }];
+		: [
+				{
+					status: details.status,
+					conclusion: details.conclusion,
+					jobs: details.jobs,
+					url: details.url,
+					databaseId: details.runId,
+					workflowName: details.workflowName,
+					displayTitle: details.displayTitle,
+					headBranch: details.headBranch,
+					headSha: details.headSha,
+				},
+			];
 	const first = runs[0] ?? {};
 	const header = [
 		fg(theme, "accent", "⎇"),
@@ -1509,6 +1514,32 @@ export function githubRenderers(R: RenderSupport): Renderers {
 				const deletions = files.reduce((sum: number, file: Any) => sum + (file.deletions ?? 0), 0);
 				const header = plainHeader(theme, icon, "GitHub PR Diff", [`${files.length} file${files.length === 1 ? "" : "s"}`]) + ` ${statPair(theme, additions, deletions)}`;
 				return lineText(R, [header, ...ghFileRows(theme, files, expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS)]);
+			}
+			if (op === "search_code" && Array.isArray(data?.items)) {
+				const items = data.items as Any[];
+				if (items.length === 0) return noMatches(R, theme, title, argText(callArgs?.query));
+				const groups: string[][] = items.map(item => {
+					const scope = [item.repository?.full_name, item.path].filter(Boolean).join(":");
+					const group = [fg(theme, "accent", scope || String(item.name ?? "match"))];
+					const fragment = ((item.text_matches ?? []) as Any[])[0]?.fragment;
+					if (typeof fragment === "string") {
+						for (const row of fragment.split("\n").slice(0, 3)) {
+							group.push(fg(theme, "toolOutput", row.replace(/\t/g, "  ")));
+						}
+					}
+					return group;
+				});
+				const header = statusLine(theme, {
+					icon: fg(theme, "toolTitle", "🔍"),
+					title,
+					description: fg(theme, "muted", argText(callArgs?.query)),
+					meta: [`${items.length} result${items.length === 1 ? "" : "s"}`],
+				});
+				const body = treeRows(theme, groups);
+				const windowed = bodyWindow(body, expanded, COLLAPSED_TREE_LINES);
+				const tail = moreLine(R, theme, windowed.hidden, expanded);
+				if (tail) windowed.shown.push(fg(theme, "dim", TREE.blank) + tail);
+				return lineText(R, [header, ...windowed.shown]);
 			}
 			if (op.startsWith("search_") && Array.isArray(data?.items)) {
 				const items = data.items as Any[];

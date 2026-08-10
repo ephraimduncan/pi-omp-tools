@@ -654,6 +654,62 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 	assert.match(watchOut, /├─── Failed log ─/);
 	assert.match(watchOut, /boom/);
 
+	// Single-run details (runDetails shape, no runs array) keep the run identity in the header.
+	const singleRunOut = call(
+		{
+			op: "run_watch",
+			state: "completed",
+			workflowName: "CI",
+			headBranch: "main",
+			headSha: "515f604aa11",
+			status: "completed",
+			conclusion: "success",
+			jobs: [{ name: "build", conclusion: "success" }],
+		},
+		{ op: "run_watch" },
+	);
+	assert.match(singleRunOut, /╭─── ⎇ Run Watch CI ⟦SUCCESS⟧ main · 515f604/);
+	assert.match(singleRunOut, /└─ ✔ build/);
+
+	// Code search renders the text-match fragment under the repo:path row.
+	const codeOut = call(
+		{
+			op: "search_code",
+			data: {
+				items: [
+					{
+						path: "src/register.ts",
+						repository: { full_name: "a/b" },
+						text_matches: [{ fragment: "renderShell: \"self\"" }],
+					},
+				],
+			},
+		},
+		{ op: "search_code", query: "renderShell" },
+	);
+	assert.match(codeOut, /🔍 GitHub Search Code: renderShell 1 result/);
+	assert.match(codeOut, /└─ a\/b:src\/register\.ts/);
+	assert.match(codeOut, /renderShell: "self"/);
+
+	// Repo topics come from the repositoryTopics field.
+	const topicsOut = call(
+		{ op: "repo_view", data: { nameWithOwner: "a/b", repositoryTopics: [{ name: "pi" }, { topic: { name: "tui" } }] } },
+		{ op: "repo_view" },
+	);
+	assert.match(topicsOut, /Topics\s+pi, tui/);
+
+	// Self-shell components own their vertical margins: one blank line each side.
+	const github2 = githubRenderers(R);
+	const boxComponent = github2.renderResult(
+		{ content: [{ type: "text", text: "unused" }], details: { op: "repo_view", data: { nameWithOwner: "a/b" } } },
+		{ expanded: false },
+		theme,
+		{ args: { op: "repo_view" }, state: {} },
+	) as { render: (w: number) => string[] };
+	const boxLines = boxComponent.render(90);
+	assert.equal(boxLines[0], "");
+	assert.equal(boxLines[boxLines.length - 1], "");
+
 	// Ops without structured details keep the fallback text rendering.
 	const fallbackOut = call({ op: "repo_view" }, { op: "repo_view", repo: "a/b" });
 	assert.match(fallbackOut, /⎇ GitHub Repo: fallback text/);

@@ -59,6 +59,7 @@ export const REPO_FIELDS = [
 	"isFork",
 	"primaryLanguage",
 	"stargazerCount",
+	"repositoryTopics",
 	"updatedAt",
 	"viewerPermission",
 	"visibility",

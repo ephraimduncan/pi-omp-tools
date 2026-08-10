@@ -13,6 +13,7 @@ Lean reimplementations of omp's core tool suite — no omp runtime, just the ide
 | [pi-find](packages/pi-find) | `find` | Glob path lookup, newest-first, gitignore-aware |
 | [pi-ast-grep](packages/pi-ast-grep) | `ast_grep` | Structural code queries via tree-sitter (ast-grep patterns) |
 | [pi-ast-edit](packages/pi-ast-edit) | `ast_edit` | Structural rewrites, previewed before apply |
+| [pi-tmp-scratch](packages/pi-tmp-scratch) | — | Per-session scratch dir under `/tmp` + prompt steering: temporary work never lands in the repo, and wiping `/tmp` is always safe (`/scratch`, `/scratch clean`) |
 
 All tools share one engine ([omp-tools-core](packages/omp-tools-core)) and one snapshot store (anchored on `globalThis`, so tags minted by `read`/`search` validate in `edit` even when the tools are installed as separate packages).
 
@@ -58,6 +59,10 @@ Registering tools is not enough — models fall back to `bash`/`ipython` habits 
 1. **`promptGuidelines`** per tool — bullets the host appends to its default system prompt ("Use search instead of shell grep/rg …").
 2. **`before_agent_start`** — appends an `## omp-tools` workflow block describing the `read → edit` anchor loop for whichever tools are installed.
 3. **Built-in retirement** — on `session_start`, same-purpose built-ins (`grep`, `glob`, `rg`, `ls`) are deactivated when `search`/`find` are present. Same-name built-ins (`read`/`write`/`edit`) are replaced by registration. Opt out with `OMP_TOOLS_KEEP_BUILTINS=1`.
+
+## /tmp scratch discipline
+
+omp roots its session scratch space under the OS temp dir so throwaway work never pollutes the repository. [pi-tmp-scratch](packages/pi-tmp-scratch) ports that habit: each session gets `/tmp/prime-scratch/<session-id>` (exported as `$PRIME_SCRATCH_DIR`), and a `## Scratch space` system-prompt block sends all probe scripts, one-off clones, downloads, and intermediate junk there. Clean `/tmp` whenever you like — nothing durable is stored in it. `/scratch` shows the dir, `/scratch clean` empties it.
 
 ## Rich UI in prime-agent: the `prime-omp` launcher
 

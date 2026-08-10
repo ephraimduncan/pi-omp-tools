@@ -1,0 +1,36 @@
+{
+  "name": "@ephraimduncan/pi-tmp-scratch",
+  "version": "0.1.0",
+  "description": "omp-style /tmp scratch discipline for pi/prime-agent: per-session scratch dir under /tmp plus system-prompt steering so temporary work never lands in the repo",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "scratch",
+    "tmp"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-tmp-scratch"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-tmp-scratch#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

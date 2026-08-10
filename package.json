@@ -27,11 +27,12 @@
       "./packages/pi-find/index.ts",
       "./packages/pi-ast-grep/index.ts",
       "./packages/pi-ast-edit/index.ts",
-      "./packages/pi-omp-statusline/index.ts"
+      "./packages/pi-omp-statusline/index.ts",
+      "./packages/pi-tmp-scratch/index.ts"
     ]
   },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

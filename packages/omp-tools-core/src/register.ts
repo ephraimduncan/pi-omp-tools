@@ -1,18 +1,11 @@
 /**
- * Tool registration + system-prompt integration.
+ * Tool registration for the original seven file/search tools.
  *
  * Each `register*` function registers one tool AND wires the shared prompt
- * contract, so the host's system prompt actively steers the model toward
- * these tools instead of shell/ipython equivalents:
- *
- *  1. `promptGuidelines` per tool — bullets the host appends to its default
- *     system prompt while the tool is active.
- *  2. A `before_agent_start` handler (registered once per process) that
- *     appends an "omp-tools" workflow block describing the read -> edit
- *     anchor loop for whichever of the tools are installed.
- *  3. A `session_start` handler that deactivates same-purpose built-in tools
- *     (e.g. pi's `grep`/`glob` when `search`/`find` are installed). Opt out
- *     with OMP_TOOLS_KEEP_BUILTINS=1.
+ * contract (see src/registry.ts), so the host's system prompt actively
+ * steers the model toward these tools instead of shell/ipython equivalents.
+ * Newer tools (todo, web_search, github, browser, inspect_image) live in
+ * self-registering modules under src/tools/.
  */
 import { Type } from "typebox";
 import {
@@ -25,6 +18,7 @@ import {
 	WRITE_DESCRIPTION,
 } from "./descriptions.ts";
 import type { PiApi } from "./host.ts";
+import { ensurePromptContract, registeredTools } from "./registry.ts";
 import {
 	astEditRenderers,
 	astGrepRenderers,
@@ -43,179 +37,6 @@ import { executeRead } from "./tools/read.ts";
 import { executeSearch, type SearchParams } from "./tools/search.ts";
 import { executeWrite } from "./tools/write.ts";
 
-/** Names of omp tools registered in this process (shared across packages). */
-const REGISTERED_KEY = Symbol.for("omp-tools.registered.v1");
-const CONTRACT_KEY = Symbol.for("omp-tools.contract.v1");
-const globalRegistry = globalThis as Record<PropertyKey, unknown>;
-globalRegistry[REGISTERED_KEY] ??= new Set<string>();
-const registeredTools = globalRegistry[REGISTERED_KEY] as Set<string>;
-
-const TOOL_SUMMARIES: Record<string, string> = {
-	read: "read — files, dirs, archives, SQLite, PDFs, notebooks, URLs through one path; mints [path#TAG] anchors",
-	write: "write — create/overwrite a file, archive entry, or SQLite row",
-	edit: "edit — hashline patches anchored on [path#TAG] + original line numbers from read/search",
-	search: "search — regex over files/globs; output rows are valid edit anchors",
-	find: "find — glob path lookup (newest-first)",
-	ast_grep: "ast_grep — structural code queries via tree-sitter patterns",
-	ast_edit: "ast_edit — structural rewrites, previewed before apply",
-};
-
-function buildContractBlock(): string {
-	const names = [...registeredTools];
-	if (names.length === 0) return "";
-	const lines: string[] = [
-		"## omp-tools",
-		"ALL file and search work goes through these tools. NEVER use bash/ipython for file operations: no cat/head/tail (use read), no grep/rg (use search), no find/ls for discovery (use find), no sed/awk/tee/heredoc rewrites or python open()/read_text()/write_text() (use edit/write). Such calls are blocked.",
-	];
-	for (const name of ["read", "write", "edit", "search", "find", "ast_grep", "ast_edit"]) {
-		if (registeredTools.has(name)) lines.push(`- ${TOOL_SUMMARIES[name]}`);
-	}
-	if (registeredTools.has("edit")) {
-		lines.push(
-			"",
-			"Anchor loop: `read`/`search` output `[path#TAG]` headers with `N:text` rows; `edit` sections copy that exact tag and name ORIGINAL line numbers. " +
-				"After an edit, the response shows fresh line numbers and the new tag — use those (or re-read) before the next edit on the same file.",
-		);
-	}
-	if (registeredTools.has("ast_edit")) {
-		lines.push("`ast_edit` is dry-run by default: verify the preview, then re-issue with apply: true.");
-	}
-	return lines.join("\n");
-}
-
-/** Wire prompt-contract + builtin-retirement handlers exactly once per process. */
-function ensurePromptContract(pi: PiApi): void {
-	if (globalRegistry[CONTRACT_KEY]) return;
-	globalRegistry[CONTRACT_KEY] = true;
-	if (typeof pi.on !== "function") return;
-
-	pi.on("before_agent_start", async (event: unknown) => {
-		const block = buildContractBlock();
-		if (!block) return undefined;
-		const systemPrompt = (event as { systemPrompt?: string }).systemPrompt;
-		if (typeof systemPrompt !== "string") return undefined;
-		if (systemPrompt.includes("## omp-tools")) return undefined;
-		return { systemPrompt: `${systemPrompt}\n\n${block}` };
-	});
-
-	pi.on("session_start", async () => {
-		retireOverlappingBuiltins(pi);
-	});
-
-	pi.on("tool_call", async (event: unknown) => {
-		const { toolName, input } = event as { toolName?: string; input?: Record<string, unknown> };
-		const verdict = guardFileOps(toolName, input);
-		if (verdict) return { block: true, reason: verdict };
-		return undefined;
-	});
-}
-
-/**
- * Deactivate built-in tools that duplicate an installed omp tool's purpose.
- * Same-name tools (read/write/edit) are replaced by registration already;
- * this handles differently-named ones (pi's grep/glob/ls vs search/find).
- */
-function retireOverlappingBuiltins(pi: PiApi): void {
-	if (process.env.OMP_TOOLS_KEEP_BUILTINS === "1") return;
-	try {
-		const getActive = (pi as { getActiveTools?: () => unknown[] }).getActiveTools;
-		const setActive = (pi as { setActiveTools?: (names: string[]) => void }).setActiveTools;
-		if (typeof getActive !== "function" || typeof setActive !== "function") return;
-		const active = getActive.call(pi).map(tool => (typeof tool === "string" ? tool : (tool as { name: string }).name));
-		const retire = new Set<string>();
-		if (registeredTools.has("search")) {
-			retire.add("grep");
-			retire.add("rg");
-		}
-		if (registeredTools.has("find")) {
-			retire.add("glob");
-			retire.add("ls");
-		}
-		const next = active.filter(name => !retire.has(name));
-		if (next.length !== active.length) setActive.call(pi, next);
-	} catch {
-		/* host without tool management — fine */
-	}
-}
-
-const BASH_FILE_IO_RE = new RegExp(
-	[
-		// leading or chained file-inspection commands (cat foo.txt, x && grep ...)
-		String.raw`(?:^|&&|\|\||;)\s*(?:cat|head|tail|less|grep|rg|egrep|fgrep)\s+[^|<>]*$`,
-		// in-place sed edits anywhere
-		String.raw`(?:^|&&|\|\||;)\s*sed\s+(?:-[a-zA-Z]*\s+)*-i`,
-		// find-based discovery
-		String.raw`(?:^|&&|\|\||;)\s*find\s+\S`,
-	].join("|"),
-	"m",
-);
-
-const PY_FILE_IO_RE = new RegExp(
-	[
-		// open(..., 'w'/'a'/'x') writes and open('r'-less) mode strings
-		String.raw`\bopen\s*\([^)]*["'][rwax]b?\+?["']`,
-		// bare open(...).read()/readlines()
-		String.raw`\bopen\s*\([^)]*\)\s*\.\s*read`,
-		String.raw`\.write_text\s*\(`,
-		String.raw`\.read_text\s*\(`,
-		String.raw`\bshutil\.(?:copy|move|rmtree)`,
-		String.raw`\bos\.(?:remove|unlink|rename)\s*\(`,
-	].join("|"),
-);
-
-/** Extract shell command text from an ipython cell: `%%bash` cells and `!cmd` lines. */
-function shellTextFromIpythonCode(code: string): string | null {
-	const trimmed = code.trimStart();
-	if (trimmed.startsWith("%%bash") || trimmed.startsWith("%%sh")) {
-		const newline = trimmed.indexOf("\n");
-		return newline === -1 ? "" : trimmed.slice(newline + 1);
-	}
-	const bangLines = code
-		.split("\n")
-		.filter(line => /^\s*!/.test(line))
-		.map(line => line.replace(/^\s*!/, ""));
-	return bangLines.length > 0 ? bangLines.join("\n") : null;
-}
-
-/**
- * Redirect obvious file I/O in bash/ipython to the omp tools. Escape hatches:
- * OMP_TOOLS_NO_GUARD=1 disables entirely; a literal `omp-ok` marker in the
- * command/code allows a specific call through (for legitimate data work).
- */
-function guardFileOps(toolName: string | undefined, input: Record<string, unknown> | undefined): string | null {
-	if (process.env.OMP_TOOLS_NO_GUARD === "1") return null;
-	if (!toolName || !input || registeredTools.size === 0) return null;
-
-	const bashRedirect =
-		"omp-tools: use the dedicated tools instead of shell file I/O — read (cat/head/tail), " +
-		"search (grep/rg), find (find/ls), edit (sed -i). " +
-		"If this command is genuinely not file inspection/editing (e.g. fixture setup), re-run it with `# omp-ok` appended.";
-
-	if (toolName === "bash") {
-		const command = typeof input.command === "string" ? input.command : "";
-		if (!command || command.includes("omp-ok")) return null;
-		if (BASH_FILE_IO_RE.test(command)) return bashRedirect;
-		return null;
-	}
-
-	if (toolName === "ipython" && (registeredTools.has("read") || registeredTools.has("edit") || registeredTools.has("write"))) {
-		const code = typeof input.code === "string" ? input.code : "";
-		if (!code || code.includes("omp-ok")) return null;
-		// prime runs shell through ipython `%%bash` cells and `!` escapes.
-		const shellText = shellTextFromIpythonCode(code);
-		if (shellText !== null) {
-			return BASH_FILE_IO_RE.test(shellText) ? bashRedirect : null;
-		}
-		if (PY_FILE_IO_RE.test(code)) {
-			return (
-				"omp-tools: use the dedicated tools instead of python file I/O — read (open/read_text), " +
-				"edit (targeted changes), write (open('w')/write_text). " +
-				"If this code is genuinely data processing rather than file viewing/editing, re-run it with `# omp-ok` in the code."
-			);
-		}
-	}
-	return null;
-}
 
 export async function registerRead(pi: PiApi): Promise<void> {
 	registeredTools.add("read");

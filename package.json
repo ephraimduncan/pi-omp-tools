@@ -1,7 +1,7 @@
 {
   "name": "pi-omp-tools",
   "private": true,
-  "description": "oh-my-pi-inspired file & search tools (read, write, hashline edit, search, find, ast_grep, ast_edit) as separate pi/prime-agent extension packages",
+  "description": "oh-my-pi-inspired tools for pi/prime-agent (read, write, hashline edit, search, find, ast_grep, ast_edit, todo, web_search, github, browser, inspect_image) as separate extension packages",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -28,6 +28,11 @@
       "./packages/pi-ast-grep/index.ts",
       "./packages/pi-ast-edit/index.ts",
       "./packages/pi-omp-statusline/index.ts",
+      "./packages/pi-todo/index.ts",
+      "./packages/pi-web-search/index.ts",
+      "./packages/pi-github/index.ts",
+      "./packages/pi-browser/index.ts",
+      "./packages/pi-inspect-image/index.ts",
       "./packages/pi-tmp-scratch/index.ts"
     ]
   },

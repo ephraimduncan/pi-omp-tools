@@ -1,0 +1,39 @@
+{
+  "name": "@ephraimduncan/pi-inspect-image",
+  "version": "0.1.0",
+  "description": "`inspect_image` tool for pi/prime-agent: image analysis through Anthropic, OpenAI, Gemini, or the host model",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "inspect-image",
+    "vision"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-inspect-image"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-inspect-image#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ephraimduncan/omp-tools-core": "^0.1.0"
+  }
+}

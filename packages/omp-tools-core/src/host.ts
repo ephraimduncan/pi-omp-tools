@@ -55,6 +55,19 @@ export interface PiApi {
 /** Error thrown by tools; hosts mark thrown errors as failed tool results. */
 export class ToolError extends Error {}
 
+/**
+ * Host session id, when the host passes its full extension context as the
+ * tool ctx (pi and prime do). Session-scoped tools key their state on it.
+ */
+export function sessionId(ctx: unknown): string | undefined {
+	if (!ctx || typeof ctx !== "object" || !("sessionManager" in ctx)) return undefined;
+	const manager = ctx.sessionManager;
+	if (!manager || typeof manager !== "object" || !("getSessionId" in manager)) return undefined;
+	if (typeof manager.getSessionId !== "function") return undefined;
+	const id: unknown = manager.getSessionId.call(manager);
+	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 export function textResult(text: string, details?: Record<string, unknown>): ToolResult {
 	return { content: [{ type: "text", text }], details: details ?? {} };
 }

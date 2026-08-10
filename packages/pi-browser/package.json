@@ -1,0 +1,39 @@
+{
+  "name": "@ephraimduncan/pi-browser",
+  "version": "0.1.0",
+  "description": "`browser` tool for pi/prime-agent: raw-CDP automation with Obscura or Chromium, without Puppeteer",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "browser",
+    "cdp"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-browser"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-browser#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ephraimduncan/omp-tools-core": "^0.1.0"
+  }
+}

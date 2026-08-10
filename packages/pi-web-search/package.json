@@ -1,0 +1,38 @@
+{
+  "name": "@ephraimduncan/pi-web-search",
+  "version": "0.1.0",
+  "description": "`web_search` tool for pi/prime-agent: up-to-date web search through Exa or Parallel",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "web-search"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-web-search"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-web-search#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ephraimduncan/omp-tools-core": "^0.1.0"
+  }
+}

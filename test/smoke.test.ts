@@ -417,17 +417,28 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	};
 
 	const edit = editRenderers(R);
-	const editOut = renderLines(
-		edit.renderResult(
-			{ details: { sections: [{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] }] } },
-			{ expanded: false },
-			theme,
-			{},
-		),
-	);
+	const editComponent = edit.renderResult(
+		{
+			details: {
+				sections: [
+					{ path: "old.ts", op: "delete" },
+					{ path: "a.ts", tag: "AAAA", op: "update", diff: "-1 old\n+1 new", warnings: ["careful"], blockResolutions: [] },
+				],
+			},
+		},
+		{ expanded: false },
+		theme,
+		{},
+	) as { render: (width: number) => string[] };
+	const editLines = editComponent.render(80);
+	const editOut = editLines.join("\n");
 	assert.match(editOut, /╭─── ✎ Edit: 🟦 a\.ts#AAAA ⟦\+1\/-1⟧/);
 	assert.match(editOut, / {2}-1│<old>/);
 	assert.match(editOut, /⚠ careful/);
+	assert.equal(editLines[0], "");
+	assert.match(editLines[1] as string, /🗑 Delete: old\.ts/);
+	assert.match(editLines[2] as string, /^╭/);
+	assert.match(editLines.at(-1) as string, /^╰/);
 	assert.match(editOut, /╰─+╯/);
 
 	const search = searchRenderers(R);
@@ -700,17 +711,34 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 	);
 	assert.match(topicsOut, /Topics\s+pi, tui/);
 
-	// Self-shell components own the inter-tool gap: one blank line at the bottom only.
+	// The next tool supplies the gap; the host supplies the gap before prose.
 	const github2 = githubRenderers(R);
 	const boxComponent = github2.renderResult(
 		{ content: [{ type: "text", text: "unused" }], details: { op: "repo_view", data: { nameWithOwner: "a/b" } } },
 		{ expanded: false },
 		theme,
 		{ args: { op: "repo_view" }, state: {} },
-	) as { render: (w: number) => string[] };
+	) as { render: (width: number) => string[] };
 	const boxLines = boxComponent.render(90);
-	assert.match(boxLines[0] as string, /^╭/); // no top margin
-	assert.equal(boxLines[boxLines.length - 1], "");
+	assert.equal(boxLines[0], "");
+	assert.match(boxLines[1] as string, /^╭/);
+	assert.match(boxLines.at(-1) as string, /^╰/);
+
+	const inlineComponent = github2.renderResult(
+		{ content: [{ type: "text", text: "Pushed 1 commit" }], details: { op: "pr_push" } },
+		{ expanded: false },
+		theme,
+		{ args: { op: "pr_push" }, state: {} },
+	) as { text: string };
+	assert.equal(inlineComponent.text.startsWith("\n"), true);
+	assert.equal(inlineComponent.text.endsWith("\n"), false);
+
+	const pendingComponent = github2.renderCall({ op: "repo_view", repo: "a/b" }, theme, { state: {} }) as {
+		render: (width: number) => string[];
+	};
+	const pendingLines = pendingComponent.render(90);
+	assert.equal(pendingLines[0], "");
+	assert.notEqual(pendingLines.at(-1), "");
 
 	// Ops without structured details keep the fallback text rendering.
 	const fallbackOut = call({ op: "repo_view" }, { op: "repo_view", repo: "a/b" });

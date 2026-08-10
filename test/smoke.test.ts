@@ -671,7 +671,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 	assert.match(singleRunOut, /╭─── ⎇ Run Watch CI ⟦SUCCESS⟧ main · 515f604/);
 	assert.match(singleRunOut, /└─ ✔ build/);
 
-	// Code search renders the text-match fragment under the repo:path row.
+	// Code search renders every text-match fragment under the repo:path row.
 	const codeOut = call(
 		{
 			op: "search_code",
@@ -680,7 +680,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 					{
 						path: "src/register.ts",
 						repository: { full_name: "a/b" },
-						text_matches: [{ fragment: "renderShell: \"self\"" }],
+						text_matches: [{ fragment: "renderShell: \"self\"" }, { fragment: "readRenderers(support)" }],
 					},
 				],
 			},
@@ -690,6 +690,8 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 	assert.match(codeOut, /🔍 GitHub Search Code: renderShell 1 result/);
 	assert.match(codeOut, /└─ a\/b:src\/register\.ts/);
 	assert.match(codeOut, /renderShell: "self"/);
+	assert.match(codeOut, /⋮/); // fragment separator
+	assert.match(codeOut, /readRenderers\(support\)/);
 
 	// Repo topics come from the repositoryTopics field.
 	const topicsOut = call(
@@ -698,7 +700,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 	);
 	assert.match(topicsOut, /Topics\s+pi, tui/);
 
-	// Self-shell components own their vertical margins: one blank line each side.
+	// Self-shell components own the inter-tool gap: one blank line at the bottom only.
 	const github2 = githubRenderers(R);
 	const boxComponent = github2.renderResult(
 		{ content: [{ type: "text", text: "unused" }], details: { op: "repo_view", data: { nameWithOwner: "a/b" } } },
@@ -707,7 +709,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 		{ args: { op: "repo_view" }, state: {} },
 	) as { render: (w: number) => string[] };
 	const boxLines = boxComponent.render(90);
-	assert.equal(boxLines[0], "");
+	assert.match(boxLines[0] as string, /^╭/); // no top margin
 	assert.equal(boxLines[boxLines.length - 1], "");
 
 	// Ops without structured details keep the fallback text rendering.

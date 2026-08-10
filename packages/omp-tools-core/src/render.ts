@@ -238,9 +238,9 @@ function bodyWindow(rows: string[], expanded: boolean, collapsedCap: number): { 
 
 /* ------------------------------ components ----------------------------- */
 
-/** Top/bottom-margined text rows: self-shell tools own the vertical padding pi's default shell provides. */
+/** Bottom-margined text rows: self-shell tools own the vertical gap pi's default shell provides. */
 function lineText(R: RenderSupport, lines: string[]): Any {
-	return new R.Text(["", ...lines, ""].join("\n"), 0, 0);
+	return new R.Text([...lines, ""].join("\n"), 0, 0);
 }
 
 /** Colon-free header (`☑ Todo 11 tasks`) used where omp drops the `Title:` form. */
@@ -269,7 +269,7 @@ function boxed(R: RenderSupport, theme: Any, opts: { header: string; borderColor
 			const w = Math.max(MIN_BOX_WIDTH, width || FALLBACK_WIDTH);
 			if (w === cachedWidth) return cached;
 			const inner = w - 2;
-			const lines: string[] = [""];
+			const lines: string[] = [];
 			const header = fit(R, opts.header.replace(/\s*\n\s*/g, " "), Math.max(1, inner - 7));
 			const headFill = Math.max(0, inner - 5 - vw(R, header));
 			lines.push(border(BOX.tl + BOX.h.repeat(3)) + ` ${header} ` + border(BOX.h.repeat(headFill) + BOX.tr));
@@ -322,7 +322,7 @@ function pendingCall(R: RenderSupport, context: Any, lines: string[]): Any {
 	return {
 		render(width: number): string[] {
 			if (state?.done) return [];
-			return ["", ...lines.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ""];
+			return [...lines.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ""];
 		},
 		invalidate(): void {},
 	};
@@ -750,7 +750,7 @@ export function editRenderers(R: RenderSupport): Renderers {
 			if (inline.length === 0) return box;
 			return {
 				render(width: number): string[] {
-					return ["", ...inline.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ...box.render(width)];
+					return [...inline.map(line => fit(R, line, Math.max(10, width || FALLBACK_WIDTH))), ...box.render(width)];
 				},
 				invalidate(): void {
 					box.invalidate();
@@ -1521,12 +1521,15 @@ export function githubRenderers(R: RenderSupport): Renderers {
 				const groups: string[][] = items.map(item => {
 					const scope = [item.repository?.full_name, item.path].filter(Boolean).join(":");
 					const group = [fg(theme, "accent", scope || String(item.name ?? "match"))];
-					const fragment = ((item.text_matches ?? []) as Any[])[0]?.fragment;
-					if (typeof fragment === "string") {
-						for (const row of fragment.split("\n").slice(0, 3)) {
+					const fragments = ((item.text_matches ?? []) as Any[])
+						.map((match: Any) => match?.fragment)
+						.filter((fragment: unknown): fragment is string => typeof fragment === "string");
+					fragments.forEach((fragment, index) => {
+						if (index > 0) group.push(fg(theme, "dim", "⋮"));
+						for (const row of fragment.split("\n")) {
 							group.push(fg(theme, "toolOutput", row.replace(/\t/g, "  ")));
 						}
-					}
+					});
 					return group;
 				});
 				const header = statusLine(theme, {

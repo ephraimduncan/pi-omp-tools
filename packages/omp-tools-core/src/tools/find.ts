@@ -71,14 +71,17 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 	const globsByBase = new Map<string, string[]>();
 	const roots: string[] = [];
 	const directHits: string[] = [];
+	const skipped: string[] = [];
 
 	for (const entry of entries) {
 		const split = splitGlobEntry(entry, cwd);
 		if (split) {
-			if (!(await statOrNull(split.base))?.isDirectory()) {
-				throw new ToolError(`Glob base directory not found: ${split.base} (from ${entry})`);
+			// A glob whose base dir does not exist matches nothing, like any glob.
+			if ((await statOrNull(split.base))?.isDirectory()) {
+				globsByBase.set(split.base, [...(globsByBase.get(split.base) ?? []), split.glob]);
+			} else {
+				skipped.push(entry);
 			}
-			globsByBase.set(split.base, [...(globsByBase.get(split.base) ?? []), split.glob]);
 			continue;
 		}
 		const abs = resolvePath(entry, cwd);
@@ -87,13 +90,14 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 		if (stat.isDirectory()) roots.push(abs);
 		else directHits.push(abs);
 	}
-	if (globsByBase.size === 0 && roots.length === 0 && directHits.length === 0) roots.push(cwd);
+	if (entries.length === 0) roots.push(cwd);
 
 	const found: string[] = [];
 	const useRg = await hasBinary("rg");
+	// Loop, don't spread: `push(...matches)` overflows the stack past ~100k paths.
 	const scan = async (base: string, patterns: string[]): Promise<void> => {
 		if (useRg) {
-			found.push(...(await ripgrepFiles(patterns, [base], hidden, gitignore, signal)));
+			for (const file of await ripgrepFiles(patterns, [base], hidden, gitignore, signal)) found.push(file);
 		} else {
 			const matches = await glob(patterns.length > 0 ? patterns : ["**/*"], {
 				cwd: base,
@@ -102,12 +106,12 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 				ignore: ["**/.git/**", "**/node_modules/**"],
 				absolute: true,
 			});
-			found.push(...matches);
+			for (const match of matches) found.push(match);
 		}
 	};
 	for (const [base, patterns] of globsByBase) await scan(base, patterns);
 	for (const root of roots) await scan(root, []);
-	found.push(...directHits);
+	for (const hit of directHits) found.push(hit);
 
 	// Dedup + stat (newest-first ordering, dir detection).
 	const unique = [...new Set(found.map(p => path.resolve(cwd, p)))];
@@ -127,7 +131,8 @@ export async function executeFind(params: FindParams, ctx?: ToolCtx, signal?: Ab
 	if (total === 0) {
 		const scope = params.path ?? ".";
 		const hint = gitignore ? " (gitignored files excluded — retry with gitignore:false)" : "";
-		return textResult(`No paths match ${JSON.stringify(scope)}${hint}.`, { total: 0, paths: [] });
+		const note = skipped.length > 0 ? ` Base directory does not exist for: ${skipped.join(", ")}.` : "";
+		return textResult(`No paths match ${JSON.stringify(scope)}${hint}.${note}`, { total: 0, paths: [] });
 	}
 
 	const shown = candidates.slice(0, limit);

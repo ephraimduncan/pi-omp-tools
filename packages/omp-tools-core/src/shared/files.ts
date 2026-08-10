@@ -48,7 +48,8 @@ export async function collectFiles(entries: string[], cwd: string, signal?: Abor
 				ignore: ["**/.git/**", "**/node_modules/**"],
 				absolute: true,
 			});
-			found.push(...matches);
+			// Loop, don't spread: `push(...matches)` overflows the stack past ~100k paths.
+			for (const match of matches) found.push(match);
 		}
 	};
 	for (const [base, patterns] of globsByBase) await scan(base, patterns);

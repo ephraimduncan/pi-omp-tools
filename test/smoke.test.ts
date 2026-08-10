@@ -770,10 +770,39 @@ test("BUG1 regression: absolute and ~ globs work in find/search/ast collect", as
 	const absAst = text(await executeAstGrep({ pat: "const $N = $V" , path: `${dir}/src/*.ts` }, { cwd: otherCwd }));
 	assert.match(absAst, /needleZ/);
 
-	// missing base dir errors loudly instead of silent no-match
+	// glob with a missing base dir matches nothing instead of erroring
+	const noBase = text(await executeFind({ path: `${dir}/nonexistent/*.py` }, { cwd: otherCwd }));
+	assert.match(noBase, /No paths match/);
+	assert.match(noBase, /Base directory does not exist/);
+});
+test("find/search: missing glob bases match nothing; missing plain paths error", async () => {
+	const dir = await makeTempDir();
+	await fs.mkdir(path.join(dir, "src"), { recursive: true });
+	await fs.writeFile(path.join(dir, "src", "a.ts"), "const needleQ = 1;\n");
+
+	// one missing base in a multi-target list still returns the other matches
+	const findOut = text(
+		await executeFind({ path: `${dir}/nonexistent/**; ${dir}/src/**/*.ts`, gitignore: false }, { cwd: dir }),
+	);
+	assert.match(findOut, /a\.ts/);
+	const searchOut = text(
+		await executeSearch({ pattern: "needleQ", path: `${dir}/nonexistent/**; ${dir}/src/**/*.ts` }, { cwd: dir }),
+	);
+	assert.match(searchOut, /a\.ts/);
+
+	// every glob base missing → no match, not an error
+	const allMissFind = text(await executeFind({ path: `${dir}/nope/**; ${dir}/also-nope/**` }, { cwd: dir }));
+	assert.match(allMissFind, /No paths match/);
+	const allMissSearch = text(
+		await executeSearch({ pattern: "needleQ", path: `${dir}/nope/**; ${dir}/also-nope/**` }, { cwd: dir }),
+	);
+	assert.match(allMissSearch, /No matches/);
+
+	// plain (non-glob) missing paths still error loudly
+	await assert.rejects(executeFind({ path: `${dir}/also-nope` }, { cwd: dir }), /Not found/);
 	await assert.rejects(
-		executeFind({ path: `${dir}/nonexistent/*.py` }, { cwd: otherCwd }),
-		/Glob base directory not found/,
+		executeSearch({ pattern: "needleQ", path: `${dir}/also-nope` }, { cwd: dir }),
+		/Search root not found/,
 	);
 });
 

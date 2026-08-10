@@ -10,6 +10,7 @@ import {
 	capOutput,
 	displayPath,
 	formatNumberedLine,
+	truncateLine,
 	normalizeText,
 	splitPathList,
 } from "../shared/util.ts";
@@ -84,7 +85,7 @@ export async function executeAstGrep(params: AstGrepParams, ctx?: ToolCtx, signa
 			for (let line = Math.max(match.startLine, previousEnd + 1); line <= end; line++) {
 				const text = fileLines ? (fileLines[line - 1] ?? "") : (match.text.split("\n")[line - match.startLine] ?? "");
 				out.push(formatNumberedLine(line, text));
-				detail.rows.push({ n: line, text, isMatch: true });
+				detail.rows.push({ n: line, text: truncateLine(text), isMatch: true });
 			}
 			if (end < match.endLine) out.push(`⋮ match continues to line ${match.endLine}`);
 			previousEnd = Math.max(previousEnd, end);

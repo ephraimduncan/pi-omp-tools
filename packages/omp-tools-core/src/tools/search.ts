@@ -11,6 +11,7 @@ import {
 	capOutput,
 	displayPath,
 	formatNumberedLine,
+	truncateLine,
 	hasBinary,
 	isProbablyBinary,
 	normalizeText,
@@ -87,10 +88,8 @@ async function parseTargets(rawPath: string | undefined, cwd: string): Promise<S
 		// relative printed paths.
 		const split = splitGlobEntry(entry, cwd);
 		if (split) {
-			if (!(await statOrNull(split.base))?.isDirectory()) {
-				throw new ToolError(`Glob base directory not found: ${split.base} (from ${entry})`);
-			}
-			targets.push({ root: split.base, glob: split.glob });
+			// A glob whose base dir does not exist matches nothing, like any glob.
+			if ((await statOrNull(split.base))?.isDirectory()) targets.push({ root: split.base, glob: split.glob });
 			continue;
 		}
 		throw new ToolError(`Search root not found: ${entry}`);
@@ -311,7 +310,7 @@ export async function executeSearch(params: SearchParams, ctx?: ToolCtx, signal?
 			}
 			if (previousLine > 0 && lineNumber > previousLine + 1) out.push("…");
 			out.push(formatNumberedLine(lineNumber, line.text));
-			detail.rows.push({ n: lineNumber, text: line.text, isMatch: line.isMatch });
+			detail.rows.push({ n: lineNumber, text: truncateLine(line.text), isMatch: line.isMatch });
 			previousLine = lineNumber;
 			if (line.isMatch) emittedMatches++;
 		}

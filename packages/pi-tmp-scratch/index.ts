@@ -7,7 +7,7 @@
  *
  * - `session_start`: creates a per-session scratch directory under /tmp
  *   (falling back to os.tmpdir() when /tmp is unavailable) and exports it as
- *   $PRIME_SCRATCH_DIR so shells and kernels spawned afterwards inherit it.
+ *   $PI_SCRATCH_DIR so shells and kernels spawned afterwards inherit it.
  * - `before_agent_start`: appends a "## Scratch space" block to the system
  *   prompt — all temporary work (probe scripts, repro programs, one-off
  *   clones, downloads, generated junk, large intermediates) goes to the
@@ -42,7 +42,7 @@ globalRegistry[STATE_KEY] ??= {};
 const state = globalRegistry[STATE_KEY] as { dir?: string };
 
 export const SCRATCH_MARKER = "## Scratch space";
-const BASE_NAME = "prime-scratch";
+const BASE_NAME = "pi-scratch";
 
 /** Prefer the literal /tmp (the dir the user actually cleans) over the darwin
  * per-user os.tmpdir() (/var/folders/...), which survives /tmp wipes. */
@@ -75,14 +75,14 @@ export function ensureScratchDir(ctx: unknown): string {
 	const dir = path.join(scratchRoot(), BASE_NAME, sessionSlug(ctx));
 	fs.mkdirSync(dir, { recursive: true });
 	state.dir = dir;
-	process.env.PRIME_SCRATCH_DIR = dir;
+	process.env.PI_SCRATCH_DIR = dir;
 	return dir;
 }
 
 export function scratchBlock(dir: string): string {
 	return [
 		SCRATCH_MARKER,
-		`Session scratch directory: ${dir} (already created; also exported as $PRIME_SCRATCH_DIR).`,
+		`Session scratch directory: ${dir} (already created; also exported as $PI_SCRATCH_DIR).`,
 		"Do ALL throwaway work there: probe/repro scripts, one-off clones and downloads, generated fixtures, build/test junk, large intermediate outputs. Create subdirectories freely.",
 		"- NEVER create temporary or scratch files inside the repository/workspace — no ./tmp dirs, no scratch.py or test-output files next to sources. Files the project genuinely needs at a specific path are of course fine.",
 		"- The user wipes /tmp periodically: never store durable results in the scratch dir, and skip cleanup — leftover scratch files are expected and harmless.",

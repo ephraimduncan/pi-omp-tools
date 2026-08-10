@@ -62,7 +62,7 @@ Registering tools is not enough — models fall back to `bash`/`ipython` habits 
 
 ## /tmp scratch discipline
 
-omp roots its session scratch space under the OS temp dir so throwaway work never pollutes the repository. [pi-tmp-scratch](packages/pi-tmp-scratch) ports that habit: each session gets `/tmp/prime-scratch/<session-id>` (exported as `$PRIME_SCRATCH_DIR`), and a `## Scratch space` system-prompt block sends all probe scripts, one-off clones, downloads, and intermediate junk there. Clean `/tmp` whenever you like — nothing durable is stored in it. `/scratch` shows the dir, `/scratch clean` empties it.
+omp roots its session scratch space under the OS temp dir so throwaway work never pollutes the repository. [pi-tmp-scratch](packages/pi-tmp-scratch) ports that habit: each session gets `/tmp/pi-scratch/<session-id>` (exported as `$PI_SCRATCH_DIR`), and a `## Scratch space` system-prompt block sends all probe scripts, one-off clones, downloads, and intermediate junk there. Clean `/tmp` whenever you like — nothing durable is stored in it. `/scratch` shows the dir, `/scratch clean` empties it.
 
 ## Rich UI in prime-agent: the `prime-omp` launcher
 

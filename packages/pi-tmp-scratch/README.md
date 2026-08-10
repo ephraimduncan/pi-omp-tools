@@ -6,7 +6,7 @@ omp keeps throwaway work out of the repository by rooting its session scratch sp
 
 ## What it does
 
-- **Per-session scratch dir** — on `session_start` it creates `/tmp/prime-scratch/<session-id>` (falls back to `os.tmpdir()` if `/tmp` is unwritable) and exports it as `$PRIME_SCRATCH_DIR`.
+- **Per-session scratch dir** — on `session_start` it creates `/tmp/pi-scratch/<session-id>` (falls back to `os.tmpdir()` if `/tmp` is unwritable) and exports it as `$PI_SCRATCH_DIR`.
 - **System-prompt steering** — on `before_agent_start` it appends a `## Scratch space` block: all temporary work (probe/repro scripts, one-off clones, downloads, generated fixtures, build junk, large intermediates) goes to the scratch dir, never into the repo/workspace; nothing durable is stored there because `/tmp` gets wiped.
 - **`/scratch` command** — shows the directory and a contents summary; `/scratch clean` empties it.
 

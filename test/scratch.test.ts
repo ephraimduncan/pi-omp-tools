@@ -31,16 +31,16 @@ const ctx = (notifications?: string[]) => ({
 	sessionManager: { getSessionId: () => SESSION_ID },
 	ui: { notify: (message: string) => notifications?.push(message) },
 });
-const expectedDir = path.join(scratchRoot(), "prime-scratch", SESSION_ID);
+const expectedDir = path.join(scratchRoot(), "pi-scratch", SESSION_ID);
 
-test("scratch: session_start creates the dir and exports PRIME_SCRATCH_DIR", async () => {
+test("scratch: session_start creates the dir and exports PI_SCRATCH_DIR", async () => {
 	await fs.rm(expectedDir, { recursive: true, force: true });
 	const { pi, handlers } = makeFakePi();
 	tmpScratch(pi as never);
 	for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx());
 	const stat = await fs.stat(expectedDir);
 	assert.ok(stat.isDirectory());
-	assert.equal(process.env.PRIME_SCRATCH_DIR, expectedDir);
+	assert.equal(process.env.PI_SCRATCH_DIR, expectedDir);
 });
 
 test("scratch: before_agent_start appends the prompt block once", async () => {
@@ -90,7 +90,7 @@ test("scratch: falls back to pid slug without a session manager", async () => {
 	tmpScratch(pi as never);
 	const handler = (handlers.get("before_agent_start") ?? [])[0];
 	const outcome = (await handler?.({ systemPrompt: "P" }, {})) as { systemPrompt: string };
-	const pidDir = path.join(scratchRoot(), "prime-scratch", `pid-${process.pid}`);
+	const pidDir = path.join(scratchRoot(), "pi-scratch", `pid-${process.pid}`);
 	assert.ok(outcome.systemPrompt.includes(pidDir));
 	await fs.rm(pidDir, { recursive: true, force: true });
 });

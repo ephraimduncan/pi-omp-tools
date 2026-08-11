@@ -68,9 +68,21 @@ test("read: directory listing", async () => {
 	const dir = await makeTempDir();
 	await fs.mkdir(path.join(dir, "sub"));
 	await fs.writeFile(path.join(dir, "a.txt"), "hi");
-	const output = text(await executeRead(dir, undefined, { cwd: dir }));
+	const result = await executeRead(dir, undefined, { cwd: dir });
+	const output = text(result);
 	assert.match(output, /sub\//);
 	assert.match(output, /a\.txt/);
+	// Structured entries for the tree renderer, alongside the flat text body.
+	const details = result.details as { kind?: string; total?: number; entries?: Array<Record<string, unknown>> };
+	assert.equal(details.kind, "dir");
+	assert.equal(details.total, 2);
+	assert.deepEqual(
+		details.entries?.map(entry => entry.name),
+		["sub", "a.txt"],
+	);
+	assert.equal(details.entries?.[0]?.dir, true);
+	assert.equal(details.entries?.[0]?.count, 0);
+	assert.equal(typeof details.entries?.[1]?.size, "string");
 });
 
 test("write then edit: hashline replace, insert, cut", async () => {
@@ -434,9 +446,9 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	const editOut = editLines.join("\n");
 	assert.match(editOut, /╭─── ✎ Edit: 🟦 a\.ts#AAAA ⟦\+1\/-1⟧/);
 	assert.match(editOut, / {2}-1│<old>/);
-	assert.match(editOut, /⚠ careful/);
+	assert.match(editOut, /! careful/);
 	assert.equal(editLines[0], "");
-	assert.match(editLines[1] as string, /🗑 Delete: old\.ts/);
+	assert.match(editLines[1] as string, /✘ Delete: old\.ts/);
 	assert.match(editLines[2] as string, /^╭/);
 	assert.match(editLines.at(-1) as string, /^╰/);
 	assert.match(editOut, /╰─+╯/);
@@ -456,7 +468,7 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 			{},
 		),
 	);
-	assert.match(searchOut, /🔍 Search: needle 1 match · 1 file/);
+	assert.match(searchOut, /⌕ Search: needle 1 match · 1 file/);
 	assert.match(searchOut, /└─ b\.ts#BBBB/);
 	assert.match(searchOut, /\*3│a <needle> here/);
 
@@ -512,11 +524,11 @@ test("renderers: todo box, web_search sections, github inline line", async () =>
 			{ args: { op: "start", task: "Wire tools" }, state: {} },
 		),
 	);
-	assert.match(todoOut, /╭─── ☑ Todo 4 tasks/);
-	assert.match(todoOut, /I\. Setup {2}1\/1/); // untouched phase folds to a summary row
+	assert.match(todoOut, /╭─── ☑ Todo 4 tasks · 1\/4/);
+	assert.match(todoOut, /I\. Setup {2}1\/1/);
 	assert.match(todoOut, /II\. Build/);
-	assert.match(todoOut, /├─ ☐ Wire tools/);
-	assert.match(todoOut, /└─ ☐ Docs/);
+	assert.match(todoOut, /├─ \[>\] Wire tools in progress/);
+	assert.match(todoOut, /└─ \[ \] Docs pending/);
 	assert.match(todoOut, /III\. Later {2}0\/1/);
 
 	const search = webSearchRenderers(R);
@@ -641,7 +653,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 		{ op: "search_issues", query: "read" },
 	);
 	assert.equal(searchOut.includes("╭"), false); // search stays frameless
-	assert.match(searchOut, /🔍 GitHub Search Issues: read 1 result/);
+	assert.match(searchOut, /⌕ GitHub Search Issues: read 1 result/);
 	assert.match(searchOut, /└─ #9 bug in read ⟦OPEN⟧ @sam/);
 
 	const watchOut = call(
@@ -698,7 +710,7 @@ test("renderers: github structured layouts (repo box, pr box, search rows, run w
 		},
 		{ op: "search_code", query: "renderShell" },
 	);
-	assert.match(codeOut, /🔍 GitHub Search Code: renderShell 1 result/);
+	assert.match(codeOut, /⌕ GitHub Search Code: renderShell 1 result/);
 	assert.match(codeOut, /└─ a\/b:src\/register\.ts/);
 	assert.match(codeOut, /renderShell: "self"/);
 	assert.match(codeOut, /⋮/); // fragment separator

@@ -17,6 +17,75 @@ const globalRegistry = globalThis as Record<PropertyKey, unknown>;
 globalRegistry[REGISTERED_KEY] ??= new Set<string>();
 export const registeredTools = globalRegistry[REGISTERED_KEY] as Set<string>;
 
+/**
+ * Read-group tracker: consecutive `read` tool calls (no other tool, no
+ * assistant prose, no user message in between) share one group id, so the
+ * renderer can collapse them into a single omp-style `• Read (N)` tree.
+ *
+ * Group ids are stamped into each read result's details at execute time
+ * (persisted with the session), so replayed transcripts group exactly like
+ * the live session did. The boot prefix keeps ids from a previous process
+ * from colliding with this one's counter.
+ */
+const READ_GROUPS_KEY = Symbol.for("omp-tools.read-groups.v1");
+interface ReadGroupTracker {
+	boot: string;
+	counter: number;
+	byCall: Map<string, string>;
+}
+globalRegistry[READ_GROUPS_KEY] ??= {
+	boot: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+	counter: 0,
+	byCall: new Map<string, string>(),
+} satisfies ReadGroupTracker;
+const readGroups = globalRegistry[READ_GROUPS_KEY] as ReadGroupTracker;
+
+/** Live group id for a read tool call, if the tracker saw its tool_call event. */
+export function readGroupOf(toolCallId: string | undefined): string | undefined {
+	return toolCallId ? readGroups.byCall.get(toolCallId) : undefined;
+}
+
+/** Stamp the group id into a read result's details so replays group identically. */
+export function stampReadGroup(toolCallId: string, result: unknown): void {
+	const group = readGroups.byCall.get(toolCallId);
+	if (!group || !result || typeof result !== "object") return;
+	const details = (result as { details?: Record<string, unknown> }).details;
+	if (details && typeof details === "object") details.readGroup = group;
+}
+
+function breakReadGroup(): void {
+	readGroups.counter++;
+}
+
+function trackReadGroup(toolName: string | undefined, toolCallId: string | undefined): void {
+	if (toolName !== "read") {
+		breakReadGroup();
+		return;
+	}
+	if (!toolCallId) return;
+	readGroups.byCall.set(toolCallId, `${readGroups.boot}:${readGroups.counter}`);
+	if (readGroups.byCall.size > 1024) {
+		for (const key of readGroups.byCall.keys()) {
+			if (readGroups.byCall.size <= 512) break;
+			readGroups.byCall.delete(key);
+		}
+	}
+}
+
+/** True when a finished message contains visible text (assistant prose / user prompt). */
+function messageHasProse(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const { role, content } = message as { role?: unknown; content?: unknown };
+	if (role === "toolResult") return false;
+	if (typeof content === "string") return content.trim().length > 0;
+	if (!Array.isArray(content)) return false;
+	return content.some(part => {
+		if (!part || typeof part !== "object") return false;
+		const { type, text } = part as { type?: unknown; text?: unknown };
+		return type === "text" && typeof text === "string" && text.trim().length > 0;
+	});
+}
+
 const FILE_TOOLS = ["read", "write", "edit", "search", "find"];
 
 const TOOL_SUMMARIES: Record<string, string> = {
@@ -98,6 +167,8 @@ export function ensurePromptContract(pi: PiApi): void {
 	pi.on("tool_call", async (event: unknown) => {
 		if (!event || typeof event !== "object") return undefined;
 		const toolName = "toolName" in event && typeof event.toolName === "string" ? event.toolName : undefined;
+		const toolCallId = "toolCallId" in event && typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+		trackReadGroup(toolName, toolCallId);
 		let input: Record<string, unknown> | undefined;
 		if ("input" in event && event.input && typeof event.input === "object") {
 			// verified plain object above; widen to an index shape for field reads
@@ -105,6 +176,14 @@ export function ensurePromptContract(pi: PiApi): void {
 		}
 		const verdict = guardFileOps(toolName, input);
 		if (verdict) return { block: true, reason: verdict };
+		return undefined;
+	});
+
+	// Visible text between reads (assistant prose or a new user prompt)
+	// separates their panels in the transcript, so it must break the group.
+	pi.on("message_end", async (event: unknown) => {
+		if (!event || typeof event !== "object" || !("message" in event)) return undefined;
+		if (messageHasProse((event as { message?: unknown }).message)) breakReadGroup();
 		return undefined;
 	});
 }

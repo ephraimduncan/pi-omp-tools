@@ -165,6 +165,18 @@ function selectLines(
 	return { text: out.join("\n"), rows, moreLines, totalLines: total };
 }
 
+/** Structured directory entry passed to renderers via result details. */
+interface DirEntryDetail {
+	name: string;
+	dir?: boolean;
+	/** Pre-formatted size ("8.1KB") for plain files. */
+	size?: string;
+	/** Child count for readable subdirectories. */
+	count?: number;
+	/** Symlink target. */
+	link?: string;
+}
+
 async function readDirectory(abs: string, shownPath: string): Promise<ToolResult> {
 	const entries = await fs.readdir(abs, { withFileTypes: true });
 	entries.sort((a, b) => {
@@ -172,25 +184,38 @@ async function readDirectory(abs: string, shownPath: string): Promise<ToolResult
 		return a.name.localeCompare(b.name);
 	});
 	const lines: string[] = [`${shownPath}/ — ${entries.length} entries`];
+	const detailEntries: DirEntryDetail[] = [];
 	const cap = 400;
 	for (const entry of entries.slice(0, cap)) {
 		if (entry.isDirectory()) {
 			let count = "";
+			let childCount: number | undefined;
 			try {
-				count = ` (${(await fs.readdir(path.join(abs, entry.name))).length})`;
+				childCount = (await fs.readdir(path.join(abs, entry.name))).length;
+				count = ` (${childCount})`;
 			} catch {
 				/* permission */
 			}
 			lines.push(`  ${entry.name}/${count}`);
+			detailEntries.push({ name: entry.name, dir: true, ...(childCount === undefined ? {} : { count: childCount }) });
 		} else if (entry.isSymbolicLink()) {
-			lines.push(`  ${entry.name} -> ${await fs.readlink(path.join(abs, entry.name)).catch(() => "?")}`);
+			const link = await fs.readlink(path.join(abs, entry.name)).catch(() => "?");
+			lines.push(`  ${entry.name} -> ${link}`);
+			detailEntries.push({ name: entry.name, link });
 		} else {
 			const stat = await statOrNull(path.join(abs, entry.name));
 			lines.push(`  ${entry.name}  ${stat ? formatBytes(stat.size) : ""}`);
+			detailEntries.push({ name: entry.name, ...(stat ? { size: formatBytes(stat.size) } : {}) });
 		}
 	}
 	if (entries.length > cap) lines.push(`  … ${entries.length - cap} more entries`);
-	return textResult(lines.join("\n"), { kind: "dir", body: lines.join("\n") });
+	return textResult(lines.join("\n"), {
+		kind: "dir",
+		path: shownPath,
+		body: lines.join("\n"),
+		entries: detailEntries,
+		total: entries.length,
+	});
 }
 
 function renderRows(rows: Row[], cap = 100): string[] {

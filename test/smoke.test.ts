@@ -844,3 +844,148 @@ test("BUG2 regression: URL selector parsing (bare domain, trailing slash, port)"
 	const ambiguous = parseUrlTarget("https://example.com:50");
 	assert.equal(ambiguous.selector, null);
 });
+
+test("read-group tracker: stamping, breaks, and session scoping", async () => {
+	// Re-wire the contract handlers onto this test's fakePi: an earlier test
+	// already consumed the once-per-process guard.
+	delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("omp-tools.contract.v1")];
+	const handlers = new Map<string, Array<(event: unknown, ctx?: unknown) => unknown>>();
+	const tools: Array<{ name: string }> = [];
+	const fakePi = {
+		registerTool: (def: { name: string }) => tools.push(def),
+		on: (event: string, handler: (event: unknown, ctx?: unknown) => unknown) => {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+	};
+	const { registerRead } = await import("../packages/omp-tools-core/src/register.ts");
+	await registerRead(fakePi as never);
+	const readTool = tools.find(tool => tool.name === "read") as
+		| { execute: (id: string, params: object, s?: unknown, u?: unknown, ctx?: object) => Promise<{ details?: object }> }
+		| undefined;
+	assert.ok(readTool, "read tool registered");
+	const emit = async (event: string, payload: unknown, ctx: unknown = {}) => {
+		for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+	};
+	const dir = await makeTempDir();
+	const file = path.join(dir, "g.txt");
+	await fs.writeFile(file, "hello\n");
+	const readGroup = async (toolCallId: string) => {
+		const result = await readTool.execute(toolCallId, { path: file }, undefined, undefined, { cwd: dir });
+		return (result.details as { readGroup?: string }).readGroup;
+	};
+
+	// Consecutive reads share one stamped group id.
+	await emit("tool_call", { toolName: "read", toolCallId: "rg-1" });
+	await emit("tool_call", { toolName: "read", toolCallId: "rg-2" });
+	const g1 = await readGroup("rg-1");
+	assert.ok(typeof g1 === "string" && g1.length > 0, "group id stamped into details");
+	assert.equal(await readGroup("rg-2"), g1);
+
+	// A different tool call breaks the group.
+	await emit("tool_call", { toolName: "bash", toolCallId: "b-1" });
+	await emit("tool_call", { toolName: "read", toolCallId: "rg-3" });
+	const g3 = await readGroup("rg-3");
+	assert.notEqual(g3, g1);
+
+	// toolResult and invisible bookkeeping messages don't break; prose does.
+	await emit("message_end", { message: { role: "toolResult", content: [{ type: "text", text: "output" }] } });
+	await emit("message_end", { message: { role: "custom", content: "invisible bookkeeping" } });
+	await emit("tool_call", { toolName: "read", toolCallId: "rg-4" });
+	assert.equal(await readGroup("rg-4"), g3);
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Here is what I found." }] } });
+	await emit("tool_call", { toolName: "read", toolCallId: "rg-5" });
+	const g5 = await readGroup("rg-5");
+	assert.notEqual(g5, g3);
+
+	// Session-scoped: another session's tool calls neither break nor join.
+	const ctxA = { sessionManager: { getSessionId: () => "session-A" } };
+	const ctxB = { sessionManager: { getSessionId: () => "session-B" } };
+	await emit("tool_call", { toolName: "read", toolCallId: "sa-1" }, ctxA);
+	const a1 = await readGroup("sa-1");
+	await emit("tool_call", { toolName: "bash", toolCallId: "sb-x" }, ctxB);
+	await emit("tool_call", { toolName: "read", toolCallId: "sb-1" }, ctxB);
+	const b1 = await readGroup("sb-1");
+	await emit("tool_call", { toolName: "read", toolCallId: "sa-2" }, ctxA);
+	assert.equal(await readGroup("sa-2"), a1, "other session's tool must not split this session's group");
+	assert.notEqual(b1, a1, "concurrent sessions must never share a group id");
+
+	// A new session in the same process starts a fresh group.
+	await emit("session_start", {}, ctxA);
+	await emit("tool_call", { toolName: "read", toolCallId: "sa-3" }, ctxA);
+	assert.notEqual(await readGroup("sa-3"), a1);
+
+	// A read without a toolCallId fences the group instead of being hopped over.
+	await emit("tool_call", { toolName: "read", toolCallId: "f-1" });
+	const f1 = await readGroup("f-1");
+	await emit("tool_call", { toolName: "read" });
+	await emit("tool_call", { toolName: "read", toolCallId: "f-2" });
+	assert.notEqual(await readGroup("f-2"), f1);
+});
+
+test("renderers: reads collapse into one Read (N) widget without invalidate recursion", async () => {
+	const { readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+		render(): string[] {
+			return this.text.split("\n");
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = {
+		fg: (_c: string, text: string) => text,
+		bold: (text: string) => text,
+		inverse: (text: string) => text,
+	};
+	const read = readRenderers(R);
+	const groupId = `test-render:${Date.now().toString(36)}`;
+	const result1 = { content: [], details: { kind: "text", path: "a.ts", tag: "AAAA", rows: [{ n: 1, text: "x" }], readGroup: groupId } };
+	const result2 = { content: [], details: { kind: "text", path: "b.ts", tag: "BBBB", rows: [{ n: 1, text: "y" }], readGroup: groupId } };
+
+	// Host-faithful contexts: invalidate() synchronously re-runs renderResult
+	// (pi/prime updateDisplay) — exactly what mutually recursed before the fix.
+	let renders1 = 0;
+	let renders2 = 0;
+	let component1: { render: (w: number) => string[] } | undefined;
+	let component2: { render: (w: number) => string[] } | undefined;
+	const render1 = (): void => {
+		renders1++;
+		assert.ok(renders1 < 20, "unbounded re-render of member 1");
+		component1 = read.renderResult(result1 as never, { expanded: false }, theme, ctx1 as never) as never;
+	};
+	const render2 = (): void => {
+		renders2++;
+		assert.ok(renders2 < 20, "unbounded re-render of member 2");
+		component2 = read.renderResult(result2 as never, { expanded: false }, theme, ctx2 as never) as never;
+	};
+	const ctx1 = { toolCallId: "grw-1", state: {}, invalidate: render1 };
+	const ctx2 = { toolCallId: "grw-2", state: {}, invalidate: render2 };
+
+	render1();
+	const soloOut = component1?.render(80).join("\n") ?? "";
+	assert.match(soloOut, /Read: a\.ts#AAAA/); // single member renders solo
+
+	render2(); // second member joins; must NOT synchronously recurse
+	assert.equal(renders2, 1, "joining member must not re-render synchronously");
+	await Promise.resolve(); // deferred cross-member invalidate runs as a microtask
+	assert.ok(renders1 >= 2, "older member re-rendered once the group formed");
+	assert.ok(renders1 < 5 && renders2 < 5, `re-renders stay bounded, got ${renders1}/${renders2}`);
+
+	assert.deepEqual(component1?.render(80), [], "older slot collapses");
+	const groupOut = component2?.render(80).join("\n") ?? "";
+	assert.match(groupOut, /• Read \(2\)/);
+	assert.match(groupOut, /a\.ts#AAAA · 1 line/);
+	assert.match(groupOut, /b\.ts#BBBB · 1 line/);
+
+	// A failed member (stamped id, as on replay) renders a failed row with the reason.
+	const ctx3 = { toolCallId: "grw-3", state: {}, isError: true, args: { path: "/tmp/missing.txt" }, invalidate: () => {} };
+	const result3 = { content: [{ type: "text", text: "Not found: /tmp/missing.txt" }], details: { readGroup: groupId } };
+	const component3 = read.renderResult(result3 as never, { expanded: false }, theme, ctx3 as never) as {
+		render: (w: number) => string[];
+	};
+	const errOut = component3.render(80).join("\n");
+	assert.match(errOut, /• Read \(3\)/);
+	assert.match(errOut, /missing\.txt · failed · Not found: \/tmp\/missing\.txt/);
+});

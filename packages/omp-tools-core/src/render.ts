@@ -115,6 +115,12 @@ function fileIcon(rawPath: string | undefined, isDir = false): string {
 /* ----------------------------- ansi + width ---------------------------- */
 
 const ANSI_RE = /\x1b\[[0-9;:]*m/g;
+/**
+ * Stateless probe for "already colored?" checks. ANSI_RE carries /g for
+ * `.replace`, which makes its `.test()` stateful (lastIndex resumes mid-way
+ * on the next call), so it must never be used as a predicate.
+ */
+const HAS_ANSI_RE = /\x1b\[[0-9;:]*m/;
 
 function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
@@ -201,7 +207,7 @@ function statusLine(
 	if (opts.description) parts.push(opts.description);
 	if (opts.badge) parts.push(opts.badge);
 	if (opts.meta && opts.meta.length > 0) {
-		parts.push(opts.meta.map(part => (ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
+		parts.push(opts.meta.map(part => (HAS_ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
 	}
 	return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
@@ -253,7 +259,7 @@ function lineText(R: RenderSupport, lines: string[]): Any {
 function plainHeader(theme: Any, icon: string, title: string, meta: string[] = []): string {
 	const parts = [icon, fg(theme, "toolTitle", bold(theme, title))];
 	if (meta.length > 0) {
-		parts.push(meta.map(part => (ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
+		parts.push(meta.map(part => (HAS_ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
 	}
 	return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
@@ -570,6 +576,10 @@ interface ReadGroupMember {
 	path: string;
 	details: Any;
 	isError: boolean;
+	/** First line of the error output, for the grouped `failed` row. */
+	errorText?: string;
+	/** Result carried an image part (image reads have no details.kind). */
+	hasImage: boolean;
 	invalidate?: () => void;
 }
 
@@ -582,6 +592,21 @@ const READ_GROUP_RENDER_KEY = Symbol.for("omp-tools.read-group-render.v1");
 const renderGlobals = globalThis as Record<PropertyKey, unknown>;
 renderGlobals[READ_GROUP_RENDER_KEY] ??= new Map<string, ReadGroupMember[]>();
 const readRenderGroups = renderGlobals[READ_GROUP_RENDER_KEY] as Map<string, ReadGroupMember[]>;
+
+/**
+ * Insertion-order eviction, mirroring the registry's byCall cap: groups this
+ * far back can only re-render from deep scrollback, where a re-formed
+ * (uncollapsed) group is an acceptable trade for not retaining member
+ * details and host component closures forever.
+ */
+const READ_GROUP_RENDER_CAP = 256;
+function pruneReadRenderGroups(): void {
+	if (readRenderGroups.size <= READ_GROUP_RENDER_CAP) return;
+	for (const key of readRenderGroups.keys()) {
+		if (readRenderGroups.size <= READ_GROUP_RENDER_CAP / 2) break;
+		readRenderGroups.delete(key);
+	}
+}
 
 function dirLabel(path: string): string {
 	return `${path.replace(/\/+$/, "")}/`;
@@ -630,8 +655,11 @@ function soloDirComponent(R: RenderSupport, theme: Any, details: Any, shownPath:
 }
 
 /** ` · 7 entries` / ` · 120 lines` style summary for one grouped read row. */
-function readMemberMeta(details: Any): string {
-	if (!details || typeof details !== "object" || typeof details.kind !== "string") return "image";
+function readMemberMeta(member: ReadGroupMember): string {
+	const details = member.details;
+	if (!details || typeof details !== "object" || typeof details.kind !== "string") {
+		return member.hasImage ? "image" : "";
+	}
 	switch (details.kind) {
 		case "text": {
 			const shown = Array.isArray(details.rows) ? details.rows.length : 0;
@@ -660,12 +688,13 @@ function readGroupLines(R: RenderSupport, theme: Any, members: ReadGroupMember[]
 		const isDir = member.details?.kind === "dir";
 		const icon = fg(theme, "muted", fileIcon(member.path, isDir));
 		if (member.isError) {
-			return `${icon} ${statusIcon(theme, "error")} ${fg(theme, "accent", member.path)}${fg(theme, "dim", " · ")}${fg(theme, "error", "failed")}`;
+			const brief = member.errorText ? fg(theme, "dim", ` · ${member.errorText}`) : "";
+			return `${icon} ${statusIcon(theme, "error")} ${fg(theme, "accent", member.path)}${fg(theme, "dim", " · ")}${fg(theme, "error", "failed")}${brief}`;
 		}
 		const label = isDir
 			? fg(theme, "accent", dirLabel(member.path))
 			: pathLabel(theme, member.path, typeof member.details?.tag === "string" ? member.details.tag : undefined);
-		const meta = readMemberMeta(member.details);
+		const meta = readMemberMeta(member);
 		return `${icon} ${label}${meta ? fg(theme, "dim", ` · ${meta}`) : ""}`;
 	});
 	const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_TREE_LINES);
@@ -736,28 +765,55 @@ export function readRenderers(R: RenderSupport): Renderers {
 			const solo = () => soloReadComponent(R, theme, result, details, context, shownPath, expanded);
 
 			const toolCallId = typeof context?.toolCallId === "string" ? context.toolCallId : undefined;
+			// The stamped id is persisted with the session and therefore
+			// authoritative; the live tracker covers results that could not be
+			// stamped (errors are host-synthesized from a throw, no details).
 			const groupId =
-				readGroupOf(toolCallId) ?? (typeof details?.readGroup === "string" ? (details.readGroup as string) : undefined);
+				(typeof details?.readGroup === "string" ? (details.readGroup as string) : undefined) ?? readGroupOf(toolCallId);
 			if (!toolCallId || !groupId) return solo();
 
 			let members = readRenderGroups.get(groupId);
 			if (!members) {
 				members = [];
 				readRenderGroups.set(groupId, members);
+				pruneReadRenderGroups();
 			}
+			const isError = context?.isError === true;
+			const content = Array.isArray(result?.content) ? (result.content as Any[]) : [];
 			const member: ReadGroupMember = {
 				toolCallId,
 				path: shownPath || argText(callArgs?.path),
 				details,
-				isError: context?.isError === true,
+				isError,
+				...(isError
+					? {
+							errorText: textOf(result)
+								.split("\n")
+								.map(line => line.trim())
+								.find(line => line.length > 0)
+								?.slice(0, 80),
+						}
+					: {}),
+				hasImage: content.some(part => part && typeof part === "object" && part.type === "image"),
 				invalidate: typeof context?.invalidate === "function" ? () => context.invalidate() : undefined,
 			};
 			const existing = members.findIndex(entry => entry.toolCallId === toolCallId);
-			if (existing >= 0) members[existing] = member;
-			else members.push(member);
-			// Collapse every other member's slot; the newest member renders the group.
-			for (const other of members) {
-				if (other.toolCallId !== toolCallId) other.invalidate?.();
+			if (existing >= 0) {
+				members[existing] = member;
+			} else {
+				members.push(member);
+				// Collapse the previous members' slots; the newest renders the
+				// group. Deferred to a microtask: the host's invalidate()
+				// synchronously re-runs renderResult (pi/prime updateDisplay),
+				// so invalidating inside this call would mutually recurse
+				// between members until the stack overflows. Re-entrant calls
+				// hit the replace branch above and stop the cascade.
+				const others = members.filter(entry => entry.toolCallId !== toolCallId);
+				if (others.length > 0) {
+					queueMicrotask(() => {
+						for (const other of others) other.invalidate?.();
+					});
+				}
 			}
 
 			const group = members;

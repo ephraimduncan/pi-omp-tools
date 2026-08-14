@@ -2098,11 +2098,70 @@ export function browserRenderers(R: RenderSupport): Renderers {
 
 /* --------------------------------- bash -------------------------------- */
 
-function bashCommandPreview(theme: Any, command: string): string {
+/** `⟦text⟧` chip with dim brackets and a colored payload. */
+function chipBadge(theme: Any, text: string, color = "dim"): string {
+	return fg(theme, "dim", "⟦") + fg(theme, color, text) + fg(theme, "dim", "⟧");
+}
+
+function wallLabel(ms: number): string {
+	if (ms < 1000) return `${ms}ms`;
+	if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+	if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+	return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+function bashCommandLabel(theme: Any, command: string, cap = 64): string {
 	const first = command.split("\n")[0] ?? "";
-	const preview = first.length > 80 ? `${first.slice(0, 79)}…` : first;
+	const preview = first.length > cap ? `${first.slice(0, cap - 1)}…` : first;
 	const more = command.includes("\n") ? fg(theme, "dim", " …") : "";
 	return fg(theme, "muted", "$ ") + fg(theme, "toolOutput", preview) + more;
+}
+
+/** Chips for a settled/running bash command, mirroring the approved design. */
+function bashChips(theme: Any, details: Any, callArgs: Any): string[] {
+	const chips: string[] = [];
+	if (details?.timedOut === true) {
+		chips.push(chipBadge(theme, `timeout ${typeof callArgs?.timeout === "number" ? `${callArgs.timeout}s` : ""}`.trim(), "warning"));
+	} else if (typeof details?.exitCode === "number" && details.exitCode !== 0) {
+		chips.push(chipBadge(theme, `exit ${details.exitCode}`, "error"));
+	}
+	if (callArgs?.pty === true) chips.push(chipBadge(theme, "pty", "accent"));
+	if (typeof details?.jobId === "string") chips.push(chipBadge(theme, `job ${details.jobId}`, "accent"));
+	return chips;
+}
+
+/** Body rows: recolor truncation markers, drop lines the header chips already state. */
+function bashBodyRows(R: RenderSupport, theme: Any, text: string, details: Any): string[] {
+	const rows: string[] = [];
+	for (const line of text.split("\n")) {
+		if (/^\(exit \d+\)$/.test(line) && typeof details?.exitCode === "number") continue;
+		if (/^Command timed out after /.test(line) && details?.timedOut === true) continue;
+		if (line === "Command killed") continue;
+		if (line.startsWith("… [truncated:")) {
+			const full = typeof details?.logFile === "string" ? ` · full: ${details.logFile}` : "";
+			rows.push(
+				fg(theme, "dim", `… truncated (${line.replace(/^… \[truncated: /, "").replace(/\]$/, "").split(";")[0]})`) +
+					` ${chipBadge(theme, `${expandKeyLabel(R)}: Expand`, "accent")}` +
+					fg(theme, "dim", full),
+			);
+			continue;
+		}
+		rows.push(fg(theme, "toolOutput", line));
+	}
+	while (rows.length > 0 && stripAnsi(rows[rows.length - 1] ?? "").trim() === "") rows.pop();
+	return rows;
+}
+
+const JOB_STATUS_GLYPH: Record<string, { icon: string; color: string }> = {
+	running: { icon: "⟳", color: "accent" },
+	completed: { icon: "✔", color: "success" },
+	timeout: { icon: "!", color: "warning" },
+	killed: { icon: "✘", color: "warning" },
+};
+
+function jobStatusGlyph(theme: Any, status: string): string {
+	const spec = JOB_STATUS_GLYPH[status] ?? { icon: "✘", color: "error" };
+	return fg(theme, spec.color, spec.icon);
 }
 
 export function bashRenderers(R: RenderSupport): Renderers {
@@ -2116,15 +2175,14 @@ export function bashRenderers(R: RenderSupport): Renderers {
 				});
 				return pendingCall(R, context, [line]);
 			}
-			const meta: string[] = [];
-			if (args?.pty === true) meta.push("pty");
-			if (args?.async === true) meta.push("background");
-			if (typeof args?.cwd === "string") meta.push(`in ${args.cwd}`);
+			const chips: string[] = [];
+			if (args?.pty === true) chips.push(chipBadge(theme, "pty", "accent"));
+			if (args?.async === true) chips.push(chipBadge(theme, "background", "accent"));
 			const line = statusLine(theme, {
 				icon: statusIcon(theme, "running"),
 				title: "Bash",
-				description: bashCommandPreview(theme, argText(args?.command)),
-				meta,
+				description: bashCommandLabel(theme, argText(args?.command)) + (chips.length > 0 ? ` ${chips.join(" ")}` : ""),
+				meta: typeof args?.cwd === "string" ? [`in ${args.cwd}`] : [],
 			});
 			return pendingCall(R, context, [line]);
 		},
@@ -2136,41 +2194,102 @@ export function bashRenderers(R: RenderSupport): Renderers {
 			if (!running) markDone(context);
 			if (context?.isError) return errorBox(R, theme, "Bash", command.split("\n")[0] ?? "", result);
 
+			/* ---- job dispatch ops ---- */
+			const op = typeof callArgs?.op === "string" ? callArgs.op : undefined;
+			if (op === "jobs" && Array.isArray(details?.jobs)) {
+				const jobs = details.jobs as Any[];
+				if (jobs.length === 0) return lineText(R, [plainHeader(theme, fg(theme, "accent", "•"), "Bash jobs", ["none"])]);
+				const idWidth = Math.max(...jobs.map((job: Any) => String(job.id ?? "").length));
+				const rows = jobs.map((job: Any) => {
+					const id = String(job.id ?? "?");
+					const status = String(job.status ?? "?");
+					const wall = typeof job.wallTimeMs === "number" ? fg(theme, "dim", ` · ${wallLabel(job.wallTimeMs)}`) : "";
+					const cmd = String(job.command ?? "").split("\n")[0]?.slice(0, 60) ?? "";
+					const statusText = status.startsWith("exit") ? fg(theme, "error", status) : fg(theme, status === "completed" ? "success" : status === "running" ? "accent" : "warning", status);
+					return `${fg(theme, "accent", id.padEnd(idWidth))} ${jobStatusGlyph(theme, status)} ${statusText}${wall}   ${fg(theme, "muted", "$ ")}${fg(theme, "toolOutput", cmd)}`;
+				});
+				const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_LIST_ITEMS);
+				const lines = shown.map((row, index) => fg(theme, "dim", index === shown.length - 1 && hidden === 0 ? TREE.last : TREE.branch) + row);
+				if (hidden > 0) lines.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, hidden, expanded, "jobs"));
+				return lineText(R, [plainHeader(theme, fg(theme, "accent", "•"), "Bash jobs", [`${jobs.length}`]), ...lines]);
+			}
+			if (op === "kill") {
+				const firstLine = textOf(result).split("\n")[0] ?? "";
+				return lineText(R, [
+					statusLine(theme, {
+						icon: statusIcon(theme, "done"),
+						title: "Bash",
+						description: fg(theme, "accent", `kill ${typeof callArgs?.job === "string" ? callArgs.job : ""}`.trim()),
+						meta: [firstLine.startsWith("Sent kill") ? "kill sent" : firstLine],
+					}),
+				]);
+			}
 
-			const rows = textOf(result)
-				.split("\n")
-				.map(line => fg(theme, "toolOutput", line));
+			/* ---- background dispatch (start) ---- */
+			if (details?.background === true && running) {
+				const tailLine = textOf(result)
+					.split("\n")
+					.filter(line => line.trim() && !line.startsWith("Backgrounded as job"))
+					.pop();
+				const lines = [
+					statusLine(theme, {
+						icon: fg(theme, "accent", "◍"),
+						title: "Bash",
+						description:
+							bashCommandLabel(theme, command) +
+							` ${chipBadge(theme, `job ${details.jobId}`, "accent")}`,
+						meta: ["backgrounded — delivers on settle"],
+					}),
+				];
+				if (tailLine) lines.push(fg(theme, "dim", TREE.last) + fg(theme, "muted", tailLine));
+				return lineText(R, lines);
+			}
+
+			/* ---- running (live tail) and settled commands ---- */
+			const isWaitOp = op === "wait" || op === "output";
+			const shownCommand = isWaitOp
+				? fg(theme, "accent", `job ${typeof callArgs?.job === "string" ? callArgs.job : "?"}`)
+				: bashCommandLabel(theme, command);
+			const failed = !running && ((typeof details?.exitCode === "number" && details.exitCode !== 0) || details?.timedOut === true);
+			const icon = running
+				? statusIcon(theme, "running")
+				: details?.timedOut === true
+					? statusIcon(theme, "warning")
+					: failed
+						? statusIcon(theme, "error")
+						: statusIcon(theme, "success");
+			const chips = running
+				? callArgs?.pty === true
+					? [chipBadge(theme, "pty", "accent")]
+					: []
+				: bashChips(theme, isWaitOp ? { ...details, jobId: undefined } : details, callArgs);
+			const meta: string[] = [];
+			if (typeof details?.wallTimeMs === "number") meta.push(wallLabel(details.wallTimeMs));
+			const rows = bashBodyRows(R, theme, textOf(result), details);
+
+			if (rows.length === 0 && !running) {
+				return lineText(R, [
+					statusLine(theme, {
+						icon,
+						title: "Bash",
+						description: shownCommand + (chips.length > 0 ? ` ${chips.join(" ")}` : ""),
+						meta: [...meta, "no output"],
+					}),
+				]);
+			}
 			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES);
 			const tail = moreLine(R, theme, hidden, expanded);
 			if (tail) shown.push(tail);
-
-			const meta: string[] = [];
-			if (running) meta.push(fg(theme, "accent", "running"));
-			else if (details?.timedOut === true) meta.push(fg(theme, "warning", "timeout"));
-			else if (typeof details?.exitCode === "number" && details.exitCode !== 0) {
-				meta.push(fg(theme, "error", `exit ${details.exitCode}`));
-			}
-			if (typeof details?.wallTimeMs === "number") {
-				const ms = details.wallTimeMs;
-				meta.push(ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
-			}
-			if (typeof details?.jobId === "string") meta.push(`job ${details.jobId}`);
-			if (callArgs?.pty === true) meta.push("pty");
-
-			const failed = !running && ((typeof details?.exitCode === "number" && details.exitCode !== 0) || details?.timedOut === true);
-			const icon = running ? statusIcon(theme, "running") : failed ? statusIcon(theme, "warning") : statusIcon(theme, "success");
-			const header = statusLine(theme, {
-				icon,
-				title: "Bash",
-				description: typeof callArgs?.op === "string"
-					? fg(theme, "accent", `${callArgs.op}${typeof callArgs?.job === "string" ? ` ${callArgs.job}` : ""}`)
-					: bashCommandPreview(theme, command),
-				meta,
+			return boxed(R, theme, {
+				header: statusLine(theme, {
+					icon,
+					title: "Bash",
+					description: shownCommand + (chips.length > 0 ? ` ${chips.join(" ")}` : ""),
+					meta,
+				}),
+				borderColor: failed && details?.timedOut !== true ? "error" : undefined,
+				sections: [{ rows: shown }],
 			});
-			if (shown.length === 0 || (shown.length === 1 && stripAnsi(shown[0] ?? "").trim() === "")) {
-				return lineText(R, [header, fg(theme, "dim", "(no output)")]);
-			}
-			return boxed(R, theme, { header, sections: [{ rows: shown }] });
 		},
 	};
 }
@@ -2182,29 +2301,71 @@ interface TaskRunDetail {
 	agent?: string;
 	ok?: boolean;
 	exitCode?: number;
+	aborted?: boolean;
 	wallTimeMs?: number;
 	finalText?: string;
 	isolated?: boolean;
 	applied?: boolean;
+	patchPath?: string;
 	notice?: string;
+	usage?: { turns?: number; input?: number; output?: number; cost?: number };
+}
+
+interface TaskAgentProgress {
+	name?: string;
+	agent?: string;
+	status?: string;
+	turns?: number;
+	tools?: number;
+	isolated?: boolean;
+}
+
+function formatTaskTokens(count: number): string {
+	if (count < 1000) return String(count);
+	if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+	return `${(count / 1_000_000).toFixed(1)}M`;
+}
+
+/** `· 9s · 3 turns · ↑6 ↓179 · $0.45` stat string for one agent. */
+function taskAgentStats(theme: Any, run: TaskRunDetail): string {
+	const parts: string[] = [];
+	if (typeof run.wallTimeMs === "number") parts.push(wallLabel(run.wallTimeMs));
+	if (run.usage?.turns) parts.push(`${run.usage.turns} turn${run.usage.turns === 1 ? "" : "s"}`);
+	if (run.usage?.input) parts.push(`↑${formatTaskTokens(run.usage.input)}`);
+	if (run.usage?.output) parts.push(`↓${formatTaskTokens(run.usage.output)}`);
+	let stats = parts.length > 0 ? fg(theme, "muted", `· ${parts.join(" · ")}`) : "";
+	if (run.usage?.cost) stats += `${stats ? fg(theme, "muted", " · ") : ""}${fg(theme, "warning", `$${run.usage.cost.toFixed(2)}`)}`;
+	return stats;
+}
+
+/** `⟨agent⟩` badge for non-default agent types (omp's task row vocabulary). */
+function taskAgentBadge(theme: Any, agent: string | undefined): string {
+	const trimmed = agent?.trim();
+	if (!trimmed || trimmed === "task") return "";
+	return ` ${fg(theme, "dim", `⟨${trimmed}⟩`)}`;
 }
 
 export function taskRenderers(R: RenderSupport): Renderers {
 	return {
 		renderCall(args, theme, context) {
 			const items = (Array.isArray(args?.tasks) ? args.tasks : []) as Any[];
+			const count = items.length || 1;
 			const header = statusLine(theme, {
-				icon: statusIcon(theme, "running"),
+				icon: fg(theme, "accent", "⊕"),
 				title: "Task",
-				description: fg(theme, "muted", `${items.length || 1} subagent${(items.length || 1) === 1 ? "" : "s"}`),
+				description: fg(theme, "muted", `${count} subagent${count === 1 ? "" : "s"}`),
 			});
-			const rows = items.slice(0, COLLAPSED_LIST_ITEMS).map((item, index) => {
-				const last = index === Math.min(items.length, COLLAPSED_LIST_ITEMS) - 1;
-				const name = typeof item?.name === "string" ? item.name : `#${index + 1}`;
-				const brief = typeof item?.task === "string" ? item.task.split("\n")[0]?.slice(0, 70) : "";
-				const iso = item?.isolated === true ? fg(theme, "dim", " ⟦isolated⟧") : "";
-				return `${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "accent", name)}${iso}${brief ? fg(theme, "dim", ` · ${brief}`) : ""}`;
+			const cap = 4;
+			const rows = items.slice(0, cap).map((item, index) => {
+				const name = typeof item?.name === "string" && item.name.trim() ? item.name.trim() : `#${index + 1}`;
+				const brief = typeof item?.task === "string" ? item.task.split("\n").find((l: string) => l.trim() && !l.startsWith("#"))?.trim() ?? item.task.split("\n")[0] : "";
+				let line = `${fg(theme, "dim", "•")} ${fg(theme, "accent", bold(theme, name))}`;
+				if (brief) line += `${fg(theme, "dim", ":")} ${fg(theme, "muted", brief.length > 64 ? `${brief.slice(0, 63)}…` : brief)}`;
+				line += taskAgentBadge(theme, item?.agent);
+				if (item?.isolated === true) line += fg(theme, "dim", " [isolated]");
+				return line;
 			});
+			if (items.length > cap) rows.push(`${fg(theme, "dim", "•")} ${fg(theme, "dim", `… ${items.length - cap} more agents`)}`);
 			return pendingCall(R, context, [header, ...rows]);
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -2213,48 +2374,79 @@ export function taskRenderers(R: RenderSupport): Renderers {
 			if (!running) markDone(context);
 			if (context?.isError) return errorBox(R, theme, "Task", "", result);
 
+			/* ---- live progress tree ---- */
 			if (running) {
-				const rows = (Array.isArray(details?.rows) ? details.rows : []) as string[];
-				const shown = rows.map((row, index) => {
-					const last = index === rows.length - 1;
-					return `${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "toolOutput", row)}`;
-				});
+				const agents = (Array.isArray(details?.agents) ? details.agents : []) as TaskAgentProgress[];
+				const done = agents.filter(agent => agent.status?.startsWith("completed")).length;
+				const meta: string[] = [`${agents.length} subagent${agents.length === 1 ? "" : "s"}`];
+				if (done > 0) meta.push(`${done} done`);
+				if (typeof details?.elapsedMs === "number") meta.push(wallLabel(details.elapsedMs));
 				const header = statusLine(theme, {
 					icon: statusIcon(theme, "running"),
 					title: "Task",
-					description: fg(theme, "muted", `${rows.length} subagent${rows.length === 1 ? "" : "s"}`),
+					description: fg(theme, "muted", meta.join(" · ")),
 				});
-				return lineText(R, [header, ...shown]);
+				const rows = agents.map((agent, index) => {
+					const last = index === agents.length - 1;
+					const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+					const name = agent.name ?? "?";
+					const iso = agent.isolated === true ? fg(theme, "dim", " [isolated]") : "";
+					const status = agent.status ?? "queued";
+					if (status.startsWith("completed")) {
+						return `${prefix}${fg(theme, "text", "●")} ${fg(theme, "text", name)}${taskAgentBadge(theme, agent.agent)} ${fg(theme, "muted", status)}${iso}`;
+					}
+					if (status.startsWith("failed") || status === "aborted") {
+						return `${prefix}${fg(theme, "error", "✘")} ${fg(theme, "text", name)}${taskAgentBadge(theme, agent.agent)} ${chipBadge(theme, status, "error")}${iso}`;
+					}
+					if (status === "queued") {
+						return `${prefix}${fg(theme, "dim", "◌")} ${fg(theme, "muted", `${name} queued`)}${iso}`;
+					}
+					const stats: string[] = [];
+					if (agent.turns) stats.push(`${agent.turns} turn${agent.turns === 1 ? "" : "s"}`);
+					if (agent.tools) stats.push(`${agent.tools} tool${agent.tools === 1 ? "" : "s"}`);
+					return `${prefix}${fg(theme, "accent", "●")} ${fg(theme, "accent", name)}${taskAgentBadge(theme, agent.agent)} ${fg(theme, "muted", `running${stats.length ? ` · ${stats.join(" · ")}` : ""}`)}${iso}`;
+				});
+				return lineText(R, [header, ...rows]);
 			}
 
+			/* ---- final result box ---- */
 			const runs = (Array.isArray(details?.tasks) ? details.tasks : []) as TaskRunDetail[];
 			if (runs.length === 0) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
 			const failed = typeof details?.failed === "number" ? details.failed : runs.filter(run => run.ok === false).length;
+			const totalCost = runs.reduce((sum, run) => sum + (run.usage?.cost ?? 0), 0);
+			const meta: string[] = [`${runs.length - failed} completed${failed > 0 ? `, ${failed} failed` : ""}`];
+			if (typeof details?.wallTimeMs === "number") meta.push(wallLabel(details.wallTimeMs));
+			const headerLine =
+				statusLine(theme, {
+					icon: failed > 0 ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
+					title: "Task",
+					description: fg(theme, "muted", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`),
+					meta,
+				}) + (totalCost > 0 ? ` ${fg(theme, "warning", `$${totalCost.toFixed(2)}`)}` : "");
+
 			const sections: BoxSection[] = runs.map(run => {
-				const state = run.ok ? statusIcon(theme, "success") : statusIcon(theme, "error");
-				const wall = typeof run.wallTimeMs === "number"
-					? run.wallTimeMs < 60_000
-						? `${Math.round(run.wallTimeMs / 1000)}s`
-						: `${Math.floor(run.wallTimeMs / 60_000)}m${Math.round((run.wallTimeMs % 60_000) / 1000)}s`
-					: "";
-				const iso = run.isolated === true ? (run.applied === true ? " ⟦applied⟧" : " ⟦isolated⟧") : "";
-				const bodyRows = (run.finalText ?? "").split("\n").map(line => fg(theme, "toolOutput", line));
+				const okDot = run.ok ? fg(theme, "text", "●") : fg(theme, "error", "✘");
+				const chips: string[] = [];
+				if (!run.ok) chips.push(chipBadge(theme, run.aborted ? "aborted" : `failed: exit ${run.exitCode}`, "error"));
+				if (run.isolated === true) {
+					chips.push(run.applied === true ? chipBadge(theme, "isolated: applied", "success") : chipBadge(theme, "isolated", "accent"));
+				}
+				const label = `${okDot} ${bold(theme, run.name ?? "?")}${taskAgentBadge(theme, run.agent)}${chips.length > 0 ? ` ${chips.join(" ")}` : ""} ${taskAgentStats(theme, run)}`;
+				const bodyRows = (run.finalText ?? "")
+					.split("\n")
+					.map(line => (run.ok ? fg(theme, "toolOutput", line) : fg(theme, "error", line)));
 				const { shown, hidden } = bodyWindow(bodyRows, expanded, COLLAPSED_CODE_LINES);
 				const tail = moreLine(R, theme, hidden, expanded);
 				if (tail) shown.push(tail);
-				if (run.notice) shown.push(fg(theme, "dim", `[${run.notice}]`));
-				return {
-					label: `${state} ${run.name ?? "?"} (${run.agent ?? "task"})${iso}${wall ? ` · ${wall}` : ""}`,
-					rows: shown,
-				};
+				if (run.isolated === true && run.patchPath) {
+					shown.push(fg(theme, "dim", TREE.last) + fg(theme, "muted", `patch: ${run.patchPath}`));
+				}
+				if (run.notice && !(run.isolated && run.applied)) {
+					shown.push(fg(theme, "dim", TREE.last) + fg(theme, "muted", run.notice));
+				}
+				return { label, rows: shown };
 			});
-			const header = statusLine(theme, {
-				icon: failed > 0 ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
-				title: "Task",
-				description: fg(theme, "muted", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`),
-				meta: [fg(theme, failed > 0 ? "warning" : "success", `${runs.length - failed} completed${failed > 0 ? `, ${failed} failed` : ""}`)],
-			});
-			return boxed(R, theme, { header, sections });
+			return boxed(R, theme, { header: headerLine, sections });
 		},
 	};
 }
@@ -2263,9 +2455,19 @@ export function taskRenderers(R: RenderSupport): Renderers {
 
 interface AskResultDetail {
 	question?: string;
+	multi?: boolean;
 	selectedOptions?: string[];
 	customInput?: string;
 	cancelled?: boolean;
+}
+
+/** `◉ Dracula` / `▣ JWT · ▣ OAuth` / `✎ “custom”` answer fragment. */
+function askAnswerText(theme: Any, entry: AskResultDetail): string {
+	const mark = entry.multi ? "▣" : "◉";
+	const parts = (entry.selectedOptions ?? []).map(option => `${fg(theme, "success", mark)} ${fg(theme, "accent", option)}`);
+	if (entry.customInput) parts.push(`${fg(theme, "accent", "✎")} ${fg(theme, "accent", `“${entry.customInput}”`)} ${fg(theme, "muted", "(custom)")}`);
+	if (parts.length === 0) return fg(theme, "muted", "(nothing selected)");
+	return parts.join(fg(theme, "dim", " · "));
 }
 
 export function askRenderers(R: RenderSupport): Renderers {
@@ -2280,41 +2482,60 @@ export function askRenderers(R: RenderSupport): Renderers {
 				meta: questions.length > 1 ? [`${questions.length} questions`] : [],
 			});
 			const rows: string[] = [];
-			for (const [index, question] of questions.slice(0, 1).entries()) {
-				const options = (Array.isArray(question?.options) ? question.options : []) as Any[];
-				for (const [optIndex, option] of options.entries()) {
-					const last = index === 0 && optIndex === options.length - 1 && questions.length === 1;
-					const marker = question?.multi === true ? "▢" : "◯";
-					const rec = question?.recommended === optIndex ? fg(theme, "dim", " (Recommended)") : "";
-					rows.push(
-						`${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "muted", marker)} ${fg(theme, "toolOutput", String(option?.label ?? ""))}${rec}`,
-					);
-				}
+			const options = (Array.isArray(first?.options) ? first.options : []) as Any[];
+			const multi = first?.multi === true;
+			for (const [index, option] of options.entries()) {
+				const last = index === options.length - 1;
+				const recommended = first?.recommended === index;
+				const marker = multi ? "▢" : recommended ? "◉" : "◯";
+				let row = `${fg(theme, "muted", marker)} ${fg(theme, "toolOutput", String(option?.label ?? ""))}`;
+				if (typeof option?.description === "string") row += ` ${fg(theme, "muted", `— ${option.description}`)}`;
+				if (recommended) row += ` ${chipBadge(theme, "recommended", "accent")}`;
+				rows.push(fg(theme, "dim", last ? TREE.last : TREE.branch) + row);
 			}
 			return pendingCall(R, context, [header, ...rows]);
 		},
-		renderResult(result, { expanded: _expanded }, theme, context) {
+		renderResult(result, _options, theme, context) {
 			markDone(context);
 			if (context?.isError) return errorBox(R, theme, "Ask", "", result);
 			const details = result?.details as Any;
 			const results = (Array.isArray(details?.results) ? details.results : []) as AskResultDetail[];
 			if (results.length === 0) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+			const chatRedirect = details?.chatRedirect === true;
+
+			if (chatRedirect) {
+				const header =
+					statusLine(theme, {
+						icon: statusIcon(theme, "warning"),
+						title: "Ask",
+						description: chipBadge(theme, "chat redirect", "warning"),
+						meta: ["user moved the discussion to chat"],
+					});
+				const rows = results.map((entry, index) => {
+					const last = index === results.length - 1;
+					const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+					if (entry.cancelled) return `${prefix}${fg(theme, "muted", `${entry.question} — unanswered`)}`;
+					return `${prefix}${fg(theme, "muted", String(entry.question))} ${fg(theme, "dim", "→")} ${askAnswerText(theme, entry)}`;
+				});
+				return lineText(R, [header, ...rows]);
+			}
+
+			if (results.length === 1) {
+				const entry = results[0] as AskResultDetail;
+				const header = statusLine(theme, {
+					icon: statusIcon(theme, "success"),
+					title: "Ask",
+					description: fg(theme, "muted", String(entry.question ?? "")),
+				});
+				return lineText(R, [header, fg(theme, "dim", TREE.last) + askAnswerText(theme, entry)]);
+			}
+
+			const header = plainHeader(theme, statusIcon(theme, "success"), "Ask", [`${results.length} questions`]);
 			const rows = results.map((entry, index) => {
 				const last = index === results.length - 1;
 				const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
-				const question = fg(theme, "muted", String(entry.question ?? ""));
-				if (entry.cancelled) return `${prefix}${question} ${fg(theme, "warning", "→ chat")}`;
-				const answers = [...(entry.selectedOptions ?? [])];
-				if (entry.customInput) answers.push(`“${entry.customInput}”`);
-				return `${prefix}${question} ${fg(theme, "dim", "→")} ${fg(theme, "accent", answers.join(", ") || "(none)")}`;
+				return `${prefix}${fg(theme, "muted", String(entry.question))} ${fg(theme, "dim", "→")} ${askAnswerText(theme, entry)}`;
 			});
-			const chatRedirect = details?.chatRedirect === true;
-			const header = plainHeader(
-				theme,
-				chatRedirect ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
-				"Ask",
-				[`${results.length} question${results.length === 1 ? "" : "s"}`],
-			);
 			return lineText(R, [header, ...rows]);
 		},
 	};

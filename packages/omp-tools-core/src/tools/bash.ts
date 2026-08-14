@@ -584,7 +584,12 @@ async function executeJobOp(params: BashParams, signal?: AbortSignal): Promise<T
 				return `${job.id}  ${jobStatus(job)}  ${wall}  ${job.command.split("\n")[0]?.slice(0, 80)}`;
 			});
 			return textResult(rows.join("\n"), {
-				jobs: [...store.jobs.values()].map(job => ({ id: job.id, status: jobStatus(job), command: job.command })),
+				jobs: [...store.jobs.values()].map(job => ({
+					id: job.id,
+					status: jobStatus(job),
+					command: job.command,
+					wallTimeMs: (job.settledAt ?? Date.now()) - job.startedAt,
+				})),
 			});
 		}
 		case "output": {
@@ -782,6 +787,10 @@ export async function registerBash(pi: PiApi): Promise<void> {
 
 	pi.registerTool({
 		...(support ? { renderShell: "self", ...bashRenderers(support) } : {}),
+		// Daemon-attached TUIs cannot receive render functions; this string
+		// survives serialization and activates the TUI's built-in bash panel
+		// (styled `$ command` + output). In-process hosts use our renderers.
+		replayBuiltInToolName: "bash",
 		name: "bash",
 		label: "Bash",
 		description: BASH_DESCRIPTION,

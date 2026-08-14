@@ -431,7 +431,10 @@ export async function executeTask(
 	const cwd = ctx?.cwd ?? process.cwd();
 	const agents = await discoverAgents(cwd);
 	const taken = new Set<string>(items.map(item => item.name).filter((name): name is string => !!name));
+	const batchStarted = Date.now();
 	const statuses: string[] = [];
+	/** Structured live progress for renderers: status kind + counters per agent. */
+	const progress: Array<{ name: string; agent: string; status: string; turns: number; tools: number; isolated: boolean }> = [];
 	const runs: Array<TaskRunResult | undefined> = Array.from({ length: items.length });
 
 	const resolved = items.map((item, index) => {
@@ -447,13 +450,24 @@ export async function executeTask(
 			}
 		}
 		statuses[index] = "queued";
+		progress[index] = {
+			name,
+			agent: agentDef?.name ?? "task",
+			status: "queued",
+			turns: 0,
+			tools: 0,
+			isolated: item.isolated === true,
+		};
 		return { item, index, name, agentDef };
 	});
 
 	const pushUpdate = () => {
 		if (!onUpdate) return;
 		const rows = resolved.map(entry => `${entry.name} (${entry.agentDef?.name ?? "task"}): ${statuses[entry.index]}`);
-		onUpdate({ content: [{ type: "text", text: rows.join("\n") }], details: { running: true, rows } });
+		onUpdate({
+			content: [{ type: "text", text: rows.join("\n") }],
+			details: { running: true, rows, agents: progress.map(agent => ({ ...agent })), elapsedMs: Date.now() - batchStarted },
+		});
 	};
 	pushUpdate();
 
@@ -463,6 +477,7 @@ export async function executeTask(
 		let isolation: Isolation | undefined;
 		let isolationNotice: string | undefined;
 		statuses[entry.index] = "starting";
+		progress[entry.index]!.status = "running";
 		pushUpdate();
 
 		if (entry.item.isolated === true) {
@@ -486,6 +501,10 @@ export async function executeTask(
 				if (kind === "turn") turns++;
 				else tools++;
 				statuses[entry.index] = `running · ${turns} turn${turns === 1 ? "" : "s"} · ${tools} tool${tools === 1 ? "" : "s"}`;
+				const live = progress[entry.index]!;
+				live.status = "running";
+				live.turns = turns;
+				live.tools = tools;
 				pushUpdate();
 			},
 		});
@@ -511,6 +530,7 @@ export async function executeTask(
 		};
 		runs[entry.index] = run;
 		statuses[entry.index] = run.ok ? `completed in ${formatWall(run.wallTimeMs)}` : spawned.aborted ? "aborted" : `failed (exit ${run.exitCode})`;
+		progress[entry.index]!.status = run.ok ? `completed · ${formatWall(run.wallTimeMs)}` : spawned.aborted ? "aborted" : `failed: exit ${run.exitCode}`;
 		pushUpdate();
 	};
 
@@ -548,6 +568,7 @@ export async function executeTask(
 	return textResult([summaryLine, "", ...sections].join("\n"), {
 		tasks: runs.filter((run): run is TaskRunResult => !!run),
 		failed,
+		wallTimeMs: Date.now() - batchStarted,
 	});
 }
 

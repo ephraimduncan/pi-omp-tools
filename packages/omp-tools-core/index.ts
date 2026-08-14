@@ -74,8 +74,10 @@ export {
 	buildArgv,
 	clampBashTimeout,
 	executeBash,
+	loadBrushNatives,
 	pickShell,
 	registerBash,
+	type BashBackend,
 	type BashParams,
 } from "./src/tools/bash.ts";
 export {

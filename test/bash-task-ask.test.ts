@@ -249,7 +249,7 @@ test("task: batch fans out and merges per-task reports", async () => {
 			{ cwd: dir },
 		);
 		const body = text(result);
-		assert.match(body, /2 subagents: 2 completed, 0 failed/);
+		assert.match(body, /2 subagents \([\w.-]+\): 2 completed, 0 failed/);
 		assert.match(body, /## AlphaWorker \(task\) — completed/);
 		assert.match(body, /## BetaWorker \(task\) — completed/);
 		assert.match(body, /Report for: # Context/);
@@ -268,7 +268,7 @@ test("task: failing subagent is reported, not thrown", async () => {
 	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
 	try {
 		const result = await executeTask({ tasks: [{ task: "# Target\nFail on purpose with a full brief." }] }, { cwd: dir });
-		assert.match(text(result), /1 subagent: 0 completed, 1 failed/);
+		assert.match(text(result), /1 subagent \([\w.-]+\): 0 completed, 1 failed/);
 		assert.match(text(result), /FAILED \(exit 2\)/);
 	} finally {
 		delete process.env.OMP_TOOLS_TASK_CLI;

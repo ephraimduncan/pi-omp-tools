@@ -84,6 +84,7 @@ export {
 	discoverAgents,
 	executeTask,
 	generateAgentName,
+	hostCliLabel,
 	parseAgentFile,
 	registerTask,
 	resolveHostCli,

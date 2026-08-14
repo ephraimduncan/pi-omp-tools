@@ -2416,6 +2416,7 @@ export function taskRenderers(R: RenderSupport): Renderers {
 			const totalCost = runs.reduce((sum, run) => sum + (run.usage?.cost ?? 0), 0);
 			const meta: string[] = [`${runs.length - failed} completed${failed > 0 ? `, ${failed} failed` : ""}`];
 			if (typeof details?.wallTimeMs === "number") meta.push(wallLabel(details.wallTimeMs));
+			if (typeof details?.hostCli === "string") meta.push(`via ${details.hostCli}`);
 			const headerLine =
 				statusLine(theme, {
 					icon: failed > 0 ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
@@ -2438,10 +2439,11 @@ export function taskRenderers(R: RenderSupport): Renderers {
 				const { shown, hidden } = bodyWindow(bodyRows, expanded, COLLAPSED_CODE_LINES);
 				const tail = moreLine(R, theme, hidden, expanded);
 				if (tail) shown.push(tail);
+				const showNotice = run.notice !== undefined && !(run.isolated && run.applied);
 				if (run.isolated === true && run.patchPath) {
-					shown.push(fg(theme, "dim", TREE.last) + fg(theme, "muted", `patch: ${run.patchPath}`));
+					shown.push(fg(theme, "dim", showNotice ? TREE.branch : TREE.last) + fg(theme, "muted", `patch: ${run.patchPath}`));
 				}
-				if (run.notice && !(run.isolated && run.applied)) {
+				if (showNotice && run.notice) {
 					shown.push(fg(theme, "dim", TREE.last) + fg(theme, "muted", run.notice));
 				}
 				return { label, rows: shown };

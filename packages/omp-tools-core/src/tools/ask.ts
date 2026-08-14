@@ -84,6 +84,281 @@ function uiOf(ctx: ToolCtx | undefined): AskUi | undefined {
 	return candidate;
 }
 
+/* ---------------------------- omp-style dialog --------------------------- */
+
+/** Host ui surface with pi's custom-component dialog (TUI mode only). */
+interface AskCustomUi {
+	custom<T>(factory: (tui: Any, theme: Any, keybindings: Any, done: (value: T) => void) => Any): Promise<T>;
+}
+// biome-ignore lint/suspicious/noExplicitAny: host TUI modules are structurally typed
+type Any = any;
+
+interface AskTuiDeps {
+	Editor: new (tui: Any, theme: Any) => Any;
+	Key: Record<string, Any>;
+	matchesKey: (data: string, key: Any) => boolean;
+	visibleWidth?: (text: string) => number;
+}
+
+let askTuiDepsPromise: Promise<AskTuiDeps | null> | undefined;
+function loadAskTuiDeps(): Promise<AskTuiDeps | null> {
+	askTuiDepsPromise ??= (async () => {
+		try {
+			// @ts-ignore -- host-only module, resolved at runtime
+			const tui = (await import("@earendil-works/pi-tui")) as Any;
+			if (!tui?.Editor || !tui?.Key || typeof tui?.matchesKey !== "function") return null;
+			return { Editor: tui.Editor, Key: tui.Key, matchesKey: tui.matchesKey, visibleWidth: tui.visibleWidth };
+		} catch {
+			return null;
+		}
+	})();
+	return askTuiDepsPromise;
+}
+
+type AskDialogOutcome =
+	| { kind: "selected"; labels: string[]; customInput?: string }
+	| { kind: "custom"; text: string }
+	| { kind: "chat" };
+
+/**
+ * omp-style ask dialog as a pi custom TUI component: bordered card with the
+ * question in the top border, ◯/◉ radio or ▢/▣ checkbox markers, dim
+ * descriptions under each label, "(Recommended)" suffix, an inline editor for
+ * "Other (type your own)", and Esc as the chat-redirect escape.
+ */
+function runAskDialog(
+	customUi: AskCustomUi,
+	deps: AskTuiDeps,
+	question: AskQuestion,
+	progress: string,
+): Promise<AskDialogOutcome | undefined> {
+	const multi = question.multi === true;
+	return customUi.custom<AskDialogOutcome>((tui, theme, _keybindings, done) => {
+		const { Editor, Key, matchesKey } = deps;
+		const fg = (color: string, text: string): string => {
+			try {
+				return theme.fg(color, text);
+			} catch {
+				return text;
+			}
+		};
+		const bold = (text: string): string => {
+			try {
+				return theme.bold(text);
+			} catch {
+				return text;
+			}
+		};
+		const vw = (text: string): number => {
+			if (deps.visibleWidth) {
+				try {
+					return deps.visibleWidth(text);
+				} catch {
+					/* fall through */
+				}
+			}
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping
+			return text.replace(/\x1b\[[0-9;:]*m/g, "").length;
+		};
+
+		const OTHER_ROW = question.options.length;
+		// Navigation order MUST match visual order: options, Other, Done?, Chat.
+		const doneRowIndex = (): number | undefined =>
+			multi && (checked.size > 0 || customText !== undefined) ? question.options.length + 1 : undefined;
+		const chatRowIndex = (): number => question.options.length + (doneRowIndex() !== undefined ? 2 : 1);
+		const rowCount = (): number => chatRowIndex() + 1;
+
+		let cursor = typeof question.recommended === "number" && question.recommended >= 0 && question.recommended < question.options.length ? question.recommended : 0;
+		let editMode = false;
+		let customText: string | undefined;
+		const checked = new Set<number>();
+		let cachedLines: string[] | undefined;
+
+		const editor = new Editor(tui, {
+			borderColor: (text: string) => fg("accent", text),
+			selectList: {
+				selectedPrefix: (text: string) => fg("accent", text),
+				selectedText: (text: string) => fg("accent", text),
+				description: (text: string) => fg("muted", text),
+				scrollInfo: (text: string) => fg("dim", text),
+				noMatch: (text: string) => fg("warning", text),
+			},
+		});
+		editor.onSubmit = (value: string) => {
+			const trimmed = value.trim();
+			if (!trimmed) {
+				editMode = false;
+				refresh();
+				return;
+			}
+			if (multi) {
+				customText = trimmed;
+				editMode = false;
+				refresh();
+			} else {
+				done({ kind: "custom", text: trimmed });
+			}
+		};
+
+		function refresh(): void {
+			cachedLines = undefined;
+			tui.requestRender();
+		}
+
+		function finishMulti(): void {
+			const labels = [...checked].sort((a, b) => a - b).map(index => question.options[index]!.label);
+			done({ kind: "selected", labels, customInput: customText });
+		}
+
+		function activate(row: number): void {
+			if (row === OTHER_ROW) {
+				editMode = true;
+				refresh();
+				return;
+			}
+			if (row === chatRowIndex()) {
+				done({ kind: "chat" });
+				return;
+			}
+			if (doneRowIndex() !== undefined && row === doneRowIndex()) {
+				finishMulti();
+				return;
+			}
+			if (row < question.options.length) {
+				if (multi) {
+					if (checked.has(row)) checked.delete(row);
+					else checked.add(row);
+					refresh();
+				} else {
+					done({ kind: "selected", labels: [question.options[row]!.label] });
+				}
+			}
+		}
+
+		function handleInput(data: string): void {
+			if (editMode) {
+				if (matchesKey(data, Key.escape)) {
+					editMode = false;
+					refresh();
+					return;
+				}
+				editor.handleInput(data);
+				refresh();
+				return;
+			}
+			if (matchesKey(data, Key.up) || data === "k") {
+				cursor = (cursor - 1 + rowCount()) % rowCount();
+				refresh();
+				return;
+			}
+			if (matchesKey(data, Key.down) || data === "j") {
+				cursor = (cursor + 1) % rowCount();
+				refresh();
+				return;
+			}
+			if (data === " " && multi && cursor < question.options.length) {
+				activate(cursor);
+				return;
+			}
+			if (matchesKey(data, Key.enter)) {
+				activate(cursor);
+				return;
+			}
+			if (matchesKey(data, Key.escape)) {
+				done({ kind: "chat" });
+			}
+		}
+
+		function render(width: number): string[] {
+			if (cachedLines) return cachedLines;
+			const w = Math.max(40, width);
+			const inner = w - 2;
+			const border = (text: string) => fg("accent", text);
+			const lines: string[] = [];
+			const pad = (row: string): string => {
+				const content = ` ${row}`;
+				const fill = Math.max(0, inner - vw(content));
+				return border("│") + content + " ".repeat(fill) + border("│");
+			};
+
+			// Header: `╭─ ? question ── 1/2 ─╮` with the question inset.
+			const headerText = `${fg("accent", "?")} ${bold(question.header ? `[${question.header}] ${question.question}` : question.question)}`;
+			const progressText = progress ? `${fg("dim", progress)} ` : "";
+			const headWidth = vw(headerText);
+			const progWidth = vw(progressText);
+			const fill = Math.max(0, inner - 4 - headWidth - progWidth - (progress ? 2 : 0));
+			lines.push(border("╭─") + ` ${headerText} ` + border("─".repeat(fill)) + (progress ? ` ${progressText}` : "") + border("─╮"));
+			lines.push(pad(""));
+
+			for (const [index, option] of question.options.entries()) {
+				const hovered = !editMode && cursor === index;
+				const recommended = question.recommended === index;
+				const marker = multi ? (checked.has(index) ? fg("success", "▣") : fg("muted", "▢")) : recommended ? fg("accent", "◉") : fg("muted", "◯");
+				const prefix = hovered ? fg("accent", "❯ ") : "  ";
+				const suffix = recommended ? fg("dim", " (Recommended)") : "";
+				const label = hovered ? fg("accent", option.label) : option.label;
+				lines.push(pad(`${prefix}${marker} ${label}${suffix}`));
+				if (option.description) lines.push(pad(`     ${fg("muted", option.description)}`));
+			}
+
+			const extraRow = (row: number, icon: string, text: string): void => {
+				const hovered = !editMode && cursor === row;
+				const prefix = hovered ? fg("accent", "❯ ") : "  ";
+				lines.push(pad(`${prefix}${icon} ${hovered ? fg("accent", text) : fg("muted", text)}`));
+			};
+			lines.push(pad(""));
+			extraRow(OTHER_ROW, fg("accent", "✎"), customText ? `${OTHER_OPTION}: ${customText}` : OTHER_OPTION);
+			const doneRow = doneRowIndex();
+			if (doneRow !== undefined) {
+				const total = checked.size + (customText !== undefined ? 1 : 0);
+				extraRow(doneRow, fg("success", "✓"), `Done (${total} selected)`);
+			}
+			extraRow(chatRowIndex(), fg("muted", "💬"), CHAT_OPTION);
+
+			if (editMode) {
+				lines.push(pad(""));
+				lines.push(pad(fg("muted", "Your answer:")));
+				for (const editorLine of editor.render(Math.max(1, inner - 4))) {
+					lines.push(pad(` ${editorLine}`));
+				}
+			}
+
+			lines.push(pad(""));
+			const hint = editMode
+				? "Enter submit · Esc back"
+				: multi
+					? "↑↓ move · Enter/Space toggle · Esc chat"
+					: "↑↓ move · Enter select · Esc chat";
+			lines.push(pad(fg("dim", hint)));
+			lines.push(border(`╰${"─".repeat(inner)}╯`));
+			cachedLines = lines;
+			return lines;
+		}
+
+		return {
+			render,
+			invalidate(): void {
+				cachedLines = undefined;
+			},
+			handleInput,
+		};
+	});
+}
+
+/** Map a dialog outcome onto the shared per-question result shape. */
+function outcomeToResult(question: AskQuestion, outcome: AskDialogOutcome): AskQuestionResult {
+	const base: AskQuestionResult = {
+		id: question.id ?? question.question,
+		question: question.question,
+		options: question.options.map(option => option.label),
+		multi: question.multi === true,
+		selectedOptions: [],
+	};
+	if (outcome.kind === "chat") return { ...base, cancelled: true };
+	if (outcome.kind === "custom") return { ...base, customInput: outcome.text };
+	return { ...base, selectedOptions: outcome.labels, customInput: outcome.customInput };
+}
+
 function fitLabel(text: string): string {
 	return text.length <= MAX_OPTION_WIDTH ? text : `${text.slice(0, MAX_OPTION_WIDTH - 1)}…`;
 }
@@ -178,8 +453,18 @@ export async function executeAsk(params: AskParams, ctx?: ToolCtx, _signal?: Abo
 		if (reserved) throw new ToolError(`Option label collides with a reserved runtime label: ${reserved.label}`);
 	}
 
+	// Prefer the omp-style custom dialog whenever the host exposes ui.custom
+	// (pi TUI and prime interactive both do; pi additionally reports
+	// ctx.mode === "tui" while prime's ctx has no mode field). RPC hosts
+	// resolve custom() to undefined, which falls back to select/input below.
+	const rawUi = (ctx as { ui?: unknown } | undefined)?.ui as (AskUi & Partial<AskCustomUi>) | undefined;
+	const hasUiSurface = (ctx as { hasUI?: boolean } | undefined)?.hasUI !== false;
+	const hostMode = (ctx as { mode?: string } | undefined)?.mode;
+	const canCustom =
+		hasUiSurface && typeof rawUi?.custom === "function" && (hostMode === undefined || hostMode === "tui");
+	const tuiDeps = canCustom ? await loadAskTuiDeps() : null;
 	const ui = uiOf(ctx);
-	if (!ui) {
+	if (!ui && !tuiDeps) {
 		throw new ToolError(
 			"ask requires an interactive session (TUI/RPC); no dialog UI is available here. State your assumption and proceed.",
 		);
@@ -202,7 +487,19 @@ export async function executeAsk(params: AskParams, ctx?: ToolCtx, _signal?: Abo
 			});
 			continue;
 		}
-		const result = question.multi === true ? await askMulti(ui, question, title) : await askSingle(ui, question, title);
+		let result: AskQuestionResult;
+		let outcome: AskDialogOutcome | undefined;
+		if (tuiDeps && rawUi) {
+			// RPC-style hosts no-op custom() and resolve undefined — fall back.
+			outcome = await runAskDialog(rawUi as AskCustomUi, tuiDeps, question, progress.trim().replace(/[()]/g, ""));
+		}
+		if (outcome !== undefined) {
+			result = outcomeToResult(question, outcome);
+		} else if (ui) {
+			result = question.multi === true ? await askMulti(ui, question, title) : await askSingle(ui, question, title);
+		} else {
+			throw new ToolError("ask dialog UI became unavailable mid-run");
+		}
 		results.push(result);
 		if (result.cancelled) redirected = true;
 	}

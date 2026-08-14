@@ -166,7 +166,13 @@ export function generateAgentName(taken: Set<string>): string {
 
 /* ------------------------------- host CLI -------------------------------- */
 
-/** Resolve the host CLI to spawn for subagents (same trick as pi's subagent example). */
+/**
+ * Resolve the host CLI to spawn for subagents: children are the SAME host
+ * that is running this tool (prime spawns prime, pi spawns pi) — the running
+ * entry script is re-invoked with the host's own runtime. Only when the entry
+ * cannot be determined (compiled/bunfs binaries) does the PATH fallback run,
+ * preferring the CLI whose name appears in this process's own invocation.
+ */
 export function resolveHostCli(): { command: string; args: string[] } {
 	const override = process.env.OMP_TOOLS_TASK_CLI;
 	if (override?.trim()) {
@@ -180,7 +186,19 @@ export function resolveHostCli(): { command: string; args: string[] } {
 	}
 	const execName = path.basename(process.execPath).toLowerCase();
 	if (!/^(node|bun)(\.exe)?$/.test(execName)) return { command: process.execPath, args: [] };
-	return { command: "pi", args: [] };
+	// Last resort: infer the host from how this process was launched.
+	const invocation = `${process.execPath} ${process.argv.join(" ")}`.toLowerCase();
+	return { command: invocation.includes("prime") ? "prime-agent" : "pi", args: [] };
+}
+
+/** Short display name of the CLI subagents are spawned with. */
+export function hostCliLabel(): string {
+	const cli = resolveHostCli();
+	const source = cli.args[0] ?? cli.command;
+	const base = path.basename(source).toLowerCase();
+	if (base.includes("prime")) return "prime-agent";
+	if (base === "pi" || base.includes("pi-coding-agent")) return "pi";
+	return path.basename(cli.command);
 }
 
 /* -------------------------------- git ----------------------------------- */
@@ -564,11 +582,12 @@ export async function executeTask(
 	});
 
 	const failed = runs.filter(run => run && !run.ok).length;
-	const summaryLine = `${runs.length} subagent${runs.length === 1 ? "" : "s"}: ${runs.length - failed} completed, ${failed} failed`;
+	const summaryLine = `${runs.length} subagent${runs.length === 1 ? "" : "s"} (${hostCliLabel()}): ${runs.length - failed} completed, ${failed} failed`;
 	return textResult([summaryLine, "", ...sections].join("\n"), {
 		tasks: runs.filter((run): run is TaskRunResult => !!run),
 		failed,
 		wallTimeMs: Date.now() - batchStarted,
+		hostCli: hostCliLabel(),
 	});
 }
 

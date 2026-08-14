@@ -11,6 +11,7 @@ import {
 	executeBash,
 	executeTask,
 	generateAgentName,
+	loadBrushNatives,
 	parseAgentFile,
 	registerAsk,
 	registerBash,
@@ -18,8 +19,14 @@ import {
 	resolveHostCli,
 	ToolError,
 	type AskUi,
+	type ToolCtx,
 	type ToolResult,
 } from "../packages/omp-tools-core/index.ts";
+
+/** Fake host ctx with a stable session id (keys the persistent brush session). */
+function sessionCtx(id: string, cwd?: string): ToolCtx {
+	return { cwd, sessionManager: { getSessionId: () => id } } as unknown as ToolCtx;
+}
 function text(result: ToolResult): string {
 	return result.content
 		.filter(part => part.type === "text")
@@ -89,7 +96,7 @@ test("bash: op kill stops a running job", async () => {
 	const jobId = /job (b\d+)/.exec(text(start))?.[1];
 	assert.ok(jobId);
 	const killed = await executeBash({ op: "kill", job: jobId });
-	assert.match(text(killed), /SIGTERM/);
+	assert.match(text(killed), /Sent kill/);
 	const waited = await executeBash({ op: "wait", job: jobId, timeout: 30 });
 	assert.match(text(waited), /Command killed/);
 });
@@ -124,6 +131,45 @@ test("bash: large output is truncated inline with a log file", async () => {
 	assert.ok(typeof logFile === "string" && fs.existsSync(logFile));
 	const full = fs.readFileSync(logFile as string, "utf8");
 	assert.match(full, /^1\n2\n3\n/);
+});
+
+/* ------------------------------ bash + brush ----------------------------- */
+
+const brushAvailable = await loadBrushNatives().then(natives => natives !== null);
+
+test("bash: brush backend is active when @oh-my-pi/pi-natives is installed", { skip: !brushAvailable }, async () => {
+	const result = await executeBash({ command: "echo brush-check" }, sessionCtx("brush-backend-test"));
+	assert.equal(result.details?.backend, "brush");
+	assert.equal(text(result), "brush-check");
+});
+
+test("bash: brush session persists exports and cd across calls", { skip: !brushAvailable }, async () => {
+	const ctx = sessionCtx("brush-persist-test");
+	await executeBash({ command: "export OMP_BRUSH_MARK=persist-7; cd /tmp" }, ctx);
+	const result = await executeBash({ command: "echo $OMP_BRUSH_MARK in $(pwd)" }, ctx);
+	assert.match(text(result), /persist-7 in .*tmp/);
+});
+
+test("bash: brush sessions are isolated per host session", { skip: !brushAvailable }, async () => {
+	await executeBash({ command: "export OMP_BRUSH_ISO=leak-check" }, sessionCtx("brush-iso-a"));
+	const result = await executeBash({ command: "echo [$OMP_BRUSH_ISO]" }, sessionCtx("brush-iso-b"));
+	assert.equal(text(result), "[]");
+});
+
+test("bash: pty mode allocates a real terminal via the native addon", { skip: !brushAvailable }, async () => {
+	const result = await executeBash({ command: "tty", pty: true }, sessionCtx("brush-pty-test"));
+	assert.equal(result.details?.backend, "brush-pty");
+	assert.match(text(result), /\/dev\/(tty|pts)/);
+});
+
+test("bash: brush async job settles through op wait", { skip: !brushAvailable }, async () => {
+	const start = await executeBash({ command: "sleep 0.2; echo brush-bg-done", async: true }, sessionCtx("brush-bg-test"));
+	assert.equal(start.details?.backend, "brush");
+	const jobId = /job (b\d+)/.exec(text(start))?.[1];
+	assert.ok(jobId);
+	const waited = await executeBash({ op: "wait", job: jobId });
+	assert.match(text(waited), /brush-bg-done/);
+	assert.equal(waited.details?.exitCode, 0);
 });
 
 /* --------------------------------- task --------------------------------- */

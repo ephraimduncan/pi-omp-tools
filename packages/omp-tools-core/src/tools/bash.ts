@@ -2,10 +2,15 @@
  * `bash` — workspace shell with optional PTY and background-job dispatch,
  * replicating oh-my-pi's Runtime bash tool contract:
  *
- *  - `command` runs in the workspace (`cwd`/`env` params instead of `cd`/inline
- *    exports), with a clamped timeout (default 300s, 0 disables).
- *  - `pty: true` allocates a real PTY via the `script` binary for terminal
- *    interaction (sudo, ssh, TUIs) — no native node-pty dependency.
+ *  - Commands run on omp's own embedded brush shell (`@oh-my-pi/pi-natives`,
+ *    the published napi addon that vendors brush-core) when that optional
+ *    dependency is installed: one persistent shell session per host session,
+ *    so `cd`, exports, functions, and aliases survive across calls, plus a
+ *    real PTY via the addon's portable-pty binding. Without the addon the
+ *    tool falls back to a per-call system shell (`$SHELL -c`) and a
+ *    `script`-based PTY.
+ *  - `command` runs in the workspace (`cwd`/`env` params instead of `cd`/
+ *    inline exports), with a clamped timeout (default 300s, 0 disables).
  *  - `async: true` dispatches the command as a background job: the call
  *    returns a job id immediately and the settled result is auto-delivered
  *    back into the conversation (hosts with `sendUserMessage`).
@@ -16,10 +21,11 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { textResult, ToolError, type PiApi, type ToolCtx, type ToolResult, type ToolUpdate } from "../host.ts";
+import { sessionId, textResult, ToolError, type PiApi, type ToolCtx, type ToolResult, type ToolUpdate } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
 import { bashRenderers, loadRenderSupport } from "../render.ts";
 
@@ -30,8 +36,10 @@ const INLINE_HEAD_LINES = 15;
 const TAIL_BUFFER_BYTES = 512 * 1024;
 const SETTLED_JOB_CAP = 64;
 const UPDATE_THROTTLE_MS = 250;
+const PTY_COLS = 120;
+const PTY_ROWS = 40;
 
-export const BASH_DESCRIPTION = `Workspace shell with optional PTY and background-job dispatch.
+export const BASH_DESCRIPTION = `Workspace shell with optional PTY and background-job dispatch. The shell session is persistent when the embedded brush shell is available (cwd, exports, functions survive across calls); otherwise each call runs in a fresh system shell.
 
 <instruction>
 - Set \`cwd\` instead of \`cd\`; use \`env: { NAME: "…" }\` for multiline/quote-heavy values.
@@ -56,14 +64,16 @@ export interface BashParams {
 	job?: string;
 }
 
+export type BashBackend = "brush" | "brush-pty" | "system" | "system-pty";
+
 interface BashJob {
 	id: string;
 	command: string;
-	proc?: ChildProcess;
+	backend: BashBackend;
 	tail: string;
 	bytesSeen: number;
 	logFile?: string;
-	logStream?: fs.WriteStream;
+	logFd?: number;
 	startedAt: number;
 	settledAt?: number;
 	exitCode?: number;
@@ -74,6 +84,8 @@ interface BashJob {
 	background: boolean;
 	timeoutSec?: number;
 	waiters: Array<() => void>;
+	/** Stop this job (SIGTERM/abort; escalates to SIGKILL for subprocesses). */
+	kill?: () => void;
 }
 
 interface BashJobStore {
@@ -85,6 +97,124 @@ const JOBS_KEY = Symbol.for("omp-tools.bash-jobs.v1");
 const globals = globalThis as Record<PropertyKey, unknown>;
 globals[JOBS_KEY] ??= { seq: 0, jobs: new Map<string, BashJob>() } satisfies BashJobStore;
 const store = globals[JOBS_KEY] as BashJobStore;
+
+/* ------------------------------ brush natives ---------------------------- */
+
+interface NativeShellRunResult {
+	exitCode?: number;
+	cancelled: boolean;
+	timedOut: boolean;
+	workingDir?: string;
+}
+
+type NativeChunkCallback = (error: Error | null, chunk: string) => void;
+
+interface NativeShell {
+	run(
+		options: { command: string; cwd?: string; env?: Record<string, string>; timeoutMs?: number; signal?: unknown },
+		onChunk?: NativeChunkCallback,
+	): Promise<NativeShellRunResult>;
+	abort(): Promise<void>;
+}
+
+interface NativePtySession {
+	start(
+		options: {
+			command: string;
+			shell?: string;
+			cwd?: string;
+			env?: Record<string, string>;
+			timeoutMs?: number;
+			signal?: unknown;
+			cols?: number;
+			rows?: number;
+		},
+		onChunk?: NativeChunkCallback,
+	): Promise<{ exitCode?: number; cancelled: boolean; timedOut: boolean }>;
+	kill(): void;
+}
+
+interface BrushNatives {
+	Shell: new (options?: { sessionEnv?: Record<string, string> }) => NativeShell;
+	PtySession: new () => NativePtySession;
+}
+
+let nativesPromise: Promise<BrushNatives | null> | undefined;
+
+/**
+ * Load omp's published native addon. The package's own entry uses Bun-only
+ * APIs (`import.meta.dir`), so under Node we fall back to requiring the
+ * platform leaf package's `.node` binary directly — N-API loads in both
+ * runtimes. `OMP_TOOLS_BASH_NO_BRUSH=1` forces the system-shell path.
+ */
+export function loadBrushNatives(): Promise<BrushNatives | null> {
+	nativesPromise ??= (async () => {
+		if (process.env.OMP_TOOLS_BASH_NO_BRUSH === "1") return null;
+		const install = (bindings: Record<string, unknown>): BrushNatives | null => {
+			if (typeof bindings.Shell !== "function" || typeof bindings.PtySession !== "function") return null;
+			if (typeof bindings.__ompInstallTokioRuntime === "function") {
+				try {
+					(bindings.__ompInstallTokioRuntime as () => void)();
+				} catch {
+					/* default napi runtime is fine */
+				}
+			}
+			return bindings as unknown as BrushNatives;
+		};
+		try {
+			// Bun (pi): the official entry works and handles variant selection.
+			// @ts-ignore -- optional dependency, resolved at runtime only
+			const mod = (await import("@oh-my-pi/pi-natives")) as Record<string, unknown>;
+			const loaded = install(mod);
+			if (loaded) return loaded;
+		} catch {
+			/* fall through to the leaf-package path */
+		}
+		try {
+			// Node (prime-agent): require the platform binary directly.
+			const tag = `${process.platform}-${process.arch}`;
+			const require_ = createRequire(import.meta.url);
+			const leafDir = path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${tag}/package.json`));
+			for (const name of [`pi_natives.${tag}-modern.node`, `pi_natives.${tag}-baseline.node`, `pi_natives.${tag}.node`]) {
+				const candidate = path.join(leafDir, name);
+				if (!fs.existsSync(candidate)) continue;
+				try {
+					return install(require_(candidate) as Record<string, unknown>);
+				} catch {
+					/* try the next variant */
+				}
+			}
+		} catch {
+			/* addon not installed */
+		}
+		return null;
+	})();
+	return nativesPromise;
+}
+
+/** Persistent brush shell per host session: cwd/env/functions survive calls. */
+interface BrushSession {
+	shell: NativeShell;
+	/** Working directory after the last session-shell command. */
+	cwd?: string;
+	/** In-flight session-shell runs; overlapping calls get a throwaway shell. */
+	busy: number;
+}
+
+const BRUSH_SESSIONS_KEY = Symbol.for("omp-tools.bash-brush-sessions.v1");
+globals[BRUSH_SESSIONS_KEY] ??= new Map<string, BrushSession>();
+const brushSessions = globals[BRUSH_SESSIONS_KEY] as Map<string, BrushSession>;
+
+function brushSessionFor(natives: BrushNatives, key: string): BrushSession {
+	let session = brushSessions.get(key);
+	if (!session) {
+		session = { shell: new natives.Shell(), busy: 0 };
+		brushSessions.set(key, session);
+	}
+	return session;
+}
+
+/* ------------------------------ shared utils ----------------------------- */
 
 function scratchDir(): string {
 	const dir = process.env.PI_SCRATCH_DIR || os.tmpdir();
@@ -122,7 +252,7 @@ function hasScriptBinary(): boolean {
 	return scriptBinaryChecked;
 }
 
-/** Build argv for the command, optionally wrapped in a PTY via `script`. */
+/** Build argv for the system-shell fallback, optionally PTY-wrapped via `script`. */
 export function buildArgv(command: string, pty: boolean): { file: string; args: string[]; ptyActive: boolean } {
 	const shell = pickShell();
 	if (process.platform === "win32") return { file: shell, args: ["/c", command], ptyActive: false };
@@ -166,18 +296,27 @@ function appendOutput(job: BashJob, chunk: string): void {
 	job.bytesSeen += Buffer.byteLength(chunk);
 	job.tail += chunk;
 	if (job.tail.length > TAIL_BUFFER_BYTES) job.tail = job.tail.slice(job.tail.length - TAIL_BUFFER_BYTES);
-	if (job.bytesSeen > INLINE_CAP_BYTES && !job.logStream) {
+	if (job.bytesSeen > INLINE_CAP_BYTES && job.logFd === undefined && !job.logFile) {
 		job.logFile = path.join(scratchDir(), `pi-omp-bash-${job.id}.log`);
 		try {
-			job.logStream = fs.createWriteStream(job.logFile);
-			job.logStream.write(job.tail);
+			// Synchronous writes: the log path is advertised in the result, so it
+			// must be fully written by the time the tool returns (issue seen with
+			// brush delivering one large burst into a not-yet-flushed stream).
+			job.logFd = fs.openSync(job.logFile, "w");
+			fs.writeSync(job.logFd, job.tail);
 			return;
 		} catch {
 			job.logFile = undefined;
-			job.logStream = undefined;
+			job.logFd = undefined;
 		}
 	}
-	job.logStream?.write(chunk);
+	if (job.logFd !== undefined) {
+		try {
+			fs.writeSync(job.logFd, chunk);
+		} catch {
+			/* log spill is best-effort */
+		}
+	}
 }
 
 function pruneSettledJobs(): void {
@@ -187,82 +326,182 @@ function pruneSettledJobs(): void {
 	for (const job of settled.slice(0, settled.length - SETTLED_JOB_CAP)) store.jobs.delete(job.id);
 }
 
-function startJob(params: {
-	command: string;
-	cwd?: string;
-	env?: Record<string, string>;
-	pty: boolean;
-	timeoutSec: number | undefined;
-	background: boolean;
-	onData?: () => void;
-}): { job: BashJob; ptyActive: boolean; settled: Promise<void> } {
-	const id = `b${++store.seq}`;
-	const { file, args, ptyActive } = buildArgv(params.command, params.pty);
+function createJob(command: string, backend: BashBackend, background: boolean, timeoutSec: number | undefined): BashJob {
 	const job: BashJob = {
-		id,
-		command: params.command,
+		id: `b${++store.seq}`,
+		command,
+		backend,
 		tail: "",
 		bytesSeen: 0,
 		startedAt: Date.now(),
-		background: params.background,
-		timeoutSec: params.timeoutSec,
+		background,
+		timeoutSec,
 		waiters: [],
 	};
-	store.jobs.set(id, job);
+	store.jobs.set(job.id, job);
 	pruneSettledJobs();
+	return job;
+}
 
+function finishJob(job: BashJob, patch: { exitCode?: number; timedOut?: boolean; error?: string }): void {
+	if (job.settledAt !== undefined) return;
+	if (patch.timedOut) job.timedOut = true;
+	if (patch.error) job.error = patch.error;
+	job.exitCode = patch.exitCode ?? (job.timedOut || job.killed ? 130 : 0);
+	job.settledAt = Date.now();
+	if (job.logFd !== undefined) {
+		try {
+			fs.closeSync(job.logFd);
+		} catch {
+			/* already closed */
+		}
+		job.logFd = undefined;
+	}
+	for (const wake of job.waiters.splice(0)) wake();
+}
+
+/* -------------------------------- runners -------------------------------- */
+
+interface RunOptions {
+	cwd?: string;
+	env?: Record<string, string>;
+	timeoutSec: number | undefined;
+	onData?: () => void;
+}
+
+/** Run on the persistent (or throwaway) brush shell. */
+function runOnBrush(job: BashJob, shell: NativeShell, options: RunOptions): Promise<void> {
+	const controller = new AbortController();
+	job.kill = () => {
+		job.killed = true;
+		controller.abort();
+	};
+	return shell
+		.run(
+			{
+				command: job.command,
+				cwd: options.cwd,
+				env: options.env,
+				timeoutMs: options.timeoutSec !== undefined ? options.timeoutSec * 1000 : undefined,
+				signal: controller.signal,
+			},
+			(error, chunk) => {
+				if (chunk) {
+					appendOutput(job, chunk);
+					options.onData?.();
+				}
+				void error;
+			},
+		)
+		.then(result => {
+			if (result.cancelled) job.killed = true;
+			finishJob(job, { exitCode: result.exitCode, timedOut: result.timedOut });
+			return result.workingDir;
+		})
+		.then(workingDir => {
+			(job as { workingDir?: string } & BashJob).workingDir = workingDir;
+		})
+		.catch(error => {
+			finishJob(job, { exitCode: 127, error: error instanceof Error ? error.message : String(error) });
+		});
+}
+
+/** Run under the addon's real PTY (portable-pty). */
+function runOnBrushPty(job: BashJob, natives: BrushNatives, options: RunOptions): Promise<void> {
+	const controller = new AbortController();
+	const pty = new natives.PtySession();
+	job.kill = () => {
+		job.killed = true;
+		controller.abort();
+		try {
+			pty.kill();
+		} catch {
+			/* already gone */
+		}
+	};
+	return pty
+		.start(
+			{
+				command: job.command,
+				shell: pickShell(),
+				cwd: options.cwd,
+				env: options.env,
+				timeoutMs: options.timeoutSec !== undefined ? options.timeoutSec * 1000 : undefined,
+				signal: controller.signal,
+				cols: PTY_COLS,
+				rows: PTY_ROWS,
+			},
+			(error, chunk) => {
+				if (chunk) {
+					appendOutput(job, chunk);
+					options.onData?.();
+				}
+				void error;
+			},
+		)
+		.then(result => {
+			if (result.cancelled) job.killed = true;
+			finishJob(job, { exitCode: result.exitCode, timedOut: result.timedOut });
+		})
+		.catch(error => {
+			finishJob(job, { exitCode: 127, error: error instanceof Error ? error.message : String(error) });
+		});
+}
+
+/** System-shell fallback: spawn `$SHELL -c` (PTY via `script` when asked). */
+function runOnSpawn(job: BashJob, pty: boolean, options: RunOptions): { settled: Promise<void>; ptyActive: boolean } {
+	const { file, args, ptyActive } = buildArgv(job.command, pty);
 	let proc: ChildProcess;
 	try {
 		proc = spawn(file, args, {
-			cwd: params.cwd,
-			env: { TERM: "xterm-256color", ...process.env, ...params.env },
+			cwd: options.cwd,
+			env: { TERM: "xterm-256color", ...process.env, ...options.env },
 			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 	} catch (error) {
-		job.error = error instanceof Error ? error.message : String(error);
-		job.exitCode = 127;
-		job.settledAt = Date.now();
-		return { job, ptyActive, settled: Promise.resolve() };
+		finishJob(job, { exitCode: 127, error: error instanceof Error ? error.message : String(error) });
+		return { settled: Promise.resolve(), ptyActive };
 	}
-	job.proc = proc;
+
+	job.kill = () => {
+		job.killed = true;
+		killTree(proc, "SIGTERM");
+		setTimeout(() => killTree(proc, "SIGKILL"), 3000).unref?.();
+	};
 
 	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-	if (params.timeoutSec !== undefined) {
+	if (options.timeoutSec !== undefined) {
 		timeoutTimer = setTimeout(() => {
 			job.timedOut = true;
 			killTree(proc, "SIGTERM");
 			setTimeout(() => killTree(proc, "SIGKILL"), 3000).unref?.();
-		}, params.timeoutSec * 1000);
+		}, options.timeoutSec * 1000);
 		timeoutTimer.unref?.();
 	}
 
 	const onChunk = (data: Buffer) => {
 		appendOutput(job, data.toString());
-		params.onData?.();
+		options.onData?.();
 	};
 	proc.stdout?.on("data", onChunk);
 	proc.stderr?.on("data", onChunk);
 
 	const settled = new Promise<void>(resolve => {
 		const finish = (code: number | null, error?: string) => {
-			if (job.settledAt !== undefined) return;
 			if (timeoutTimer) clearTimeout(timeoutTimer);
-			job.exitCode = code ?? (job.timedOut || job.killed ? 130 : 0);
-			if (error) job.error = error;
-			job.settledAt = Date.now();
-			job.logStream?.end();
-			for (const wake of job.waiters.splice(0)) wake();
+			finishJob(job, { exitCode: code ?? undefined, error });
 			resolve();
 		};
 		proc.on("close", code => finish(code));
 		proc.on("error", error => finish(127, error.message));
 	});
-
-	return { job, ptyActive, settled };
+	return { settled, ptyActive };
 }
 
-/** Strip `script`'s cooked-terminal artifacts from PTY output. */
+/* ------------------------------- rendering ------------------------------- */
+
+/** Strip cooked-terminal artifacts from PTY output. */
 function cleanPtyOutput(text: string): string {
 	return text
 		.replace(/\r\n/g, "\n")
@@ -271,8 +510,8 @@ function cleanPtyOutput(text: string): string {
 		.replace(/\x1b\[\?1049[hl]/g, "");
 }
 
-function jobOutputText(job: BashJob, pty: boolean): string {
-	const raw = pty ? cleanPtyOutput(job.tail) : job.tail;
+function jobOutputText(job: BashJob): string {
+	const raw = job.backend.endsWith("-pty") ? cleanPtyOutput(job.tail) : job.tail;
 	const text = raw.replace(/\n+$/, "");
 	if (job.bytesSeen <= INLINE_CAP_BYTES) return text;
 	const lines = text.split("\n");
@@ -291,9 +530,9 @@ function jobStatus(job: BashJob): string {
 	return job.exitCode === 0 ? "completed" : `exit ${job.exitCode}`;
 }
 
-function settledResult(job: BashJob, pty: boolean, notices: string[]): ToolResult {
+function settledResult(job: BashJob, notices: string[]): ToolResult {
 	const lines: string[] = [];
-	const output = jobOutputText(job, pty);
+	const output = jobOutputText(job);
 	if (output) lines.push(output);
 	if (job.timedOut) lines.push(`Command timed out after ${job.timeoutSec ?? "?"} seconds`);
 	else if (job.killed) lines.push("Command killed");
@@ -308,17 +547,26 @@ function settledResult(job: BashJob, pty: boolean, notices: string[]): ToolResul
 		jobId: job.background ? job.id : undefined,
 		logFile: job.logFile,
 		bytes: job.bytesSeen,
+		backend: job.backend,
 	});
 }
 
 function backgroundStartResult(job: BashJob, notices: string[]): ToolResult {
 	const lines: string[] = [];
-	const tail = jobOutputText(job, false);
+	const tail = jobOutputText(job);
 	if (tail) lines.push(tail);
 	lines.push(...notices);
 	lines.push(`Backgrounded as job ${job.id}; result will be delivered automatically.`);
-	return textResult(lines.join("\n"), { jobId: job.id, background: true, running: true, bytes: job.bytesSeen });
+	return textResult(lines.join("\n"), {
+		jobId: job.id,
+		background: true,
+		running: true,
+		bytes: job.bytesSeen,
+		backend: job.backend,
+	});
 }
+
+/* --------------------------------- job ops -------------------------------- */
 
 function requireJob(id: string | undefined): BashJob {
 	if (!id) throw new ToolError(`op requires \`job\` (one of: ${[...store.jobs.keys()].join(", ") || "none"})`);
@@ -341,7 +589,7 @@ async function executeJobOp(params: BashParams, signal?: AbortSignal): Promise<T
 		}
 		case "output": {
 			const job = requireJob(params.job);
-			const result = settledResult(job, false, job.settledAt === undefined ? ["(still running)"] : []);
+			const result = settledResult(job, job.settledAt === undefined ? ["(still running)"] : []);
 			if (result.details) result.details.running = job.settledAt === undefined;
 			return result;
 		}
@@ -362,27 +610,26 @@ async function executeJobOp(params: BashParams, signal?: AbortSignal): Promise<T
 			}
 			if (signal?.aborted) throw new ToolError("Wait aborted");
 			if (job.settledAt === undefined) {
-				const result = settledResult(job, false, [`Job ${job.id} still running after wait window; it keeps running.`]);
+				const result = settledResult(job, [`Job ${job.id} still running after wait window; it keeps running.`]);
 				if (result.details) result.details.running = true;
 				return result;
 			}
 			job.delivered = true;
-			return settledResult(job, false, []);
+			return settledResult(job, []);
 		}
 		case "kill": {
 			const job = requireJob(params.job);
 			if (job.settledAt !== undefined) return textResult(`Job ${job.id} already settled (${jobStatus(job)}).`);
 			job.killed = true;
-			if (job.proc) {
-				killTree(job.proc, "SIGTERM");
-				setTimeout(() => job.proc && killTree(job.proc, "SIGKILL"), 3000).unref?.();
-			}
-			return textResult(`Sent SIGTERM to job ${job.id}.`, { jobId: job.id });
+			job.kill?.();
+			return textResult(`Sent kill to job ${job.id}.`, { jobId: job.id });
 		}
 		default:
 			throw new ToolError(`Unknown op ${String(params.op)}`);
 	}
 }
+
+/* --------------------------------- execute -------------------------------- */
 
 /** Host hook for settled-job auto-delivery; wired by registerBash. */
 type DeliverFn = (text: string) => void;
@@ -391,7 +638,7 @@ function deliverSettled(job: BashJob, deliver: DeliverFn | undefined): void {
 	if (job.delivered || !deliver) return;
 	job.delivered = true;
 	const wall = formatWallTime((job.settledAt ?? Date.now()) - job.startedAt);
-	const body = jobOutputText(job, false);
+	const body = jobOutputText(job);
 	const status = jobStatus(job);
 	deliver(
 		`<background-job id="${job.id}" status="${status}" wallTime="${wall}">\n` +
@@ -415,7 +662,14 @@ export async function executeBash(
 	if (params.timeout !== undefined && params.timeout !== 0 && timeoutSec !== params.timeout) {
 		notices.push(`Timeout clamped to ${timeoutSec}s (requested ${params.timeout}s; allowed ${BASH_TIMEOUTS.min}-${BASH_TIMEOUTS.max}s).`);
 	}
-	const cwd = params.cwd ? path.resolve(ctx?.cwd ?? process.cwd(), params.cwd) : (ctx?.cwd ?? process.cwd());
+
+	const natives = await loadBrushNatives();
+	const sessionKey = sessionId(ctx) ?? "";
+	const brushSession = natives ? brushSessionFor(natives, sessionKey) : undefined;
+
+	// Explicit cwd wins; otherwise continue in the persistent shell's cwd.
+	const baseCwd = ctx?.cwd ?? process.cwd();
+	const cwd = params.cwd ? path.resolve(baseCwd, params.cwd) : (brushSession?.cwd ?? baseCwd);
 	if (!fs.existsSync(cwd)) throw new ToolError(`cwd does not exist: ${cwd}`);
 
 	let lastUpdate = 0;
@@ -429,26 +683,43 @@ export async function executeBash(
 	};
 
 	const wantPty = params.pty === true;
-	const { job, ptyActive, settled } = startJob({
-		command,
-		cwd,
-		env: params.env,
-		pty: wantPty,
-		timeoutSec,
-		background: params.async === true,
-		onData: () => pushUpdate(job),
-	});
-	if (wantPty && !ptyActive) notices.push("pty requested but no `script` binary is available; ran without a terminal.");
+	const background = params.async === true;
+	const runOptions: RunOptions = { cwd, env: params.env, timeoutSec, onData: () => pushUpdate(job) };
+
+	let job: BashJob;
+	let settled: Promise<void>;
+	if (natives && wantPty) {
+		job = createJob(command, "brush-pty", background, timeoutSec);
+		settled = runOnBrushPty(job, natives, runOptions);
+	} else if (natives && brushSession) {
+		job = createJob(command, "brush", background, timeoutSec);
+		if (background || brushSession.busy > 0) {
+			// Background jobs and overlapping foreground calls get their own
+			// shell so they run concurrently and can be killed independently.
+			settled = runOnBrush(job, new natives.Shell(), runOptions);
+		} else {
+			brushSession.busy++;
+			settled = runOnBrush(job, brushSession.shell, runOptions).finally(() => {
+				brushSession.busy--;
+				const workingDir = (job as { workingDir?: string } & BashJob).workingDir;
+				if (workingDir) brushSession.cwd = workingDir;
+			});
+		}
+	} else {
+		job = createJob(command, wantPty ? "system-pty" : "system", background, timeoutSec);
+		const spawned = runOnSpawn(job, wantPty, runOptions);
+		settled = spawned.settled;
+		if (wantPty && !spawned.ptyActive) {
+			job.backend = "system";
+			notices.push("pty requested but no PTY backend is available; ran without a terminal.");
+		}
+	}
 
 	const abort = () => {
-		if (job.settledAt === undefined && job.proc) {
-			job.killed = true;
-			killTree(job.proc, "SIGTERM");
-			setTimeout(() => job.proc && killTree(job.proc, "SIGKILL"), 3000).unref?.();
-		}
+		if (job.settledAt === undefined) job.kill?.();
 	};
 
-	if (params.async === true) {
+	if (background) {
 		// Background dispatch: settle later, deliver automatically.
 		void settled.then(() => deliverSettled(job, deliver));
 		return backgroundStartResult(job, notices);
@@ -456,8 +727,7 @@ export async function executeBash(
 
 	signal?.addEventListener("abort", abort, { once: true });
 	try {
-		const autoBackground =
-			!wantPty && process.env.OMP_TOOLS_BASH_NO_AUTOBG !== "1" && typeof deliver === "function";
+		const autoBackground = !wantPty && process.env.OMP_TOOLS_BASH_NO_AUTOBG !== "1" && typeof deliver === "function";
 		if (autoBackground) {
 			const thresholdMs = Math.max(
 				1000,
@@ -476,8 +746,6 @@ export async function executeBash(
 				void settled.then(() => deliverSettled(job, deliver));
 				return backgroundStartResult(job, notices);
 			}
-		} else {
-			await settled;
 		}
 		await settled;
 	} finally {
@@ -485,12 +753,14 @@ export async function executeBash(
 	}
 
 	if (signal?.aborted && !job.timedOut) {
-		const tail = jobOutputText(job, ptyActive);
+		const tail = jobOutputText(job);
 		throw new ToolError(`[Command cancelled]${tail ? `\n${tail}` : ""}`);
 	}
 	job.delivered = true;
-	return settledResult(job, ptyActive, notices);
+	return settledResult(job, notices);
 }
+
+/* -------------------------------- register -------------------------------- */
 
 export async function registerBash(pi: PiApi): Promise<void> {
 	registeredTools.add("bash");

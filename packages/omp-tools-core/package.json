@@ -34,14 +34,15 @@
     "typebox": "^1.1.24"
   },
   "optionalDependencies": {
-    "@ast-grep/lang-python": "^0.0.5",
-    "@ast-grep/lang-rust": "^0.0.5",
-    "@ast-grep/lang-go": "^0.0.5",
-    "@ast-grep/lang-java": "^0.0.5",
     "@ast-grep/lang-c": "^0.0.5",
     "@ast-grep/lang-cpp": "^0.0.5",
+    "@ast-grep/lang-go": "^0.0.5",
+    "@ast-grep/lang-java": "^0.0.5",
     "@ast-grep/lang-json": "^0.0.5",
+    "@ast-grep/lang-python": "^0.0.5",
+    "@ast-grep/lang-rust": "^0.0.5",
     "@ast-grep/lang-yaml": "^0.0.5",
+    "@oh-my-pi/pi-natives": "^17.3.3",
     "ws": "^8"
   }
 }

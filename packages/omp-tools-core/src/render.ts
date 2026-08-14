@@ -11,6 +11,8 @@
  * and on hosts without them the tools register without custom renderers.
  */
 
+import { readGroupOf } from "./registry.ts";
+
 // biome-ignore lint/suspicious/noExplicitAny: host theme/components are structurally typed
 type Any = any;
 
@@ -75,8 +77,8 @@ const STATUS: Record<string, { glyph: string; color: string }> = {
 	success: { glyph: "✔", color: "success" },
 	done: { glyph: "•", color: "success" },
 	error: { glyph: "✘", color: "error" },
-	warning: { glyph: "⚠", color: "warning" },
-	pending: { glyph: "⏳", color: "muted" },
+	warning: { glyph: "!", color: "warning" },
+	pending: { glyph: "◌", color: "accent" },
 	running: { glyph: "⟳", color: "accent" },
 	info: { glyph: "ⓘ", color: "accent" },
 };
@@ -113,6 +115,12 @@ function fileIcon(rawPath: string | undefined, isDir = false): string {
 /* ----------------------------- ansi + width ---------------------------- */
 
 const ANSI_RE = /\x1b\[[0-9;:]*m/g;
+/**
+ * Stateless probe for "already colored?" checks. ANSI_RE carries /g for
+ * `.replace`, which makes its `.test()` stateful (lastIndex resumes mid-way
+ * on the next call), so it must never be used as a predicate.
+ */
+const HAS_ANSI_RE = /\x1b\[[0-9;:]*m/;
 
 function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
@@ -198,7 +206,9 @@ function statusLine(
 	parts.push(fg(theme, "toolTitle", bold(theme, `${opts.title}:`)));
 	if (opts.description) parts.push(opts.description);
 	if (opts.badge) parts.push(opts.badge);
-	if (opts.meta && opts.meta.length > 0) parts.push(fg(theme, "dim", opts.meta.join(" · ")));
+	if (opts.meta && opts.meta.length > 0) {
+		parts.push(opts.meta.map(part => (HAS_ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
+	}
 	return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
 
@@ -226,8 +236,10 @@ function expandKeyLabel(R: RenderSupport): string {
 function moreLine(R: RenderSupport, theme: Any, hidden: number, expanded: boolean, what = "lines"): string {
 	if (hidden <= 0) return "";
 	const label = hidden === 1 ? what.replace(/s$/, "") : what;
-	const chip = expanded ? "" : ` ⟦${expandKeyLabel(R)}: Expand⟧`;
-	return fg(theme, "dim", `… ${hidden} more ${label}${chip}`);
+	const chip = expanded
+		? ""
+		: ` ${fg(theme, "dim", "⟦")}${fg(theme, "accent", `${expandKeyLabel(R)}: Expand`)}${fg(theme, "dim", "⟧")}`;
+	return fg(theme, "dim", `… ${hidden} more ${label}`) + chip;
 }
 
 function bodyWindow(rows: string[], expanded: boolean, collapsedCap: number): { shown: string[]; hidden: number } {
@@ -246,7 +258,9 @@ function lineText(R: RenderSupport, lines: string[]): Any {
 /** Colon-free header (`☑ Todo 11 tasks`) used where omp drops the `Title:` form. */
 function plainHeader(theme: Any, icon: string, title: string, meta: string[] = []): string {
 	const parts = [icon, fg(theme, "toolTitle", bold(theme, title))];
-	if (meta.length > 0) parts.push(fg(theme, "dim", meta.join(" · ")));
+	if (meta.length > 0) {
+		parts.push(meta.map(part => (HAS_ANSI_RE.test(part) ? part : fg(theme, "dim", part))).join(fg(theme, "dim", " · ")));
+	}
 	return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
 
@@ -547,6 +561,192 @@ function errorBox(R: RenderSupport, theme: Any, title: string, subject: string, 
 
 /* -------------------------------- read --------------------------------- */
 
+/** Structured dir entry shape produced by read.ts for `kind: "dir"` results. */
+interface DirEntryDetail {
+	name: string;
+	dir?: boolean;
+	size?: string;
+	count?: number;
+	link?: string;
+}
+
+/** One member of a consecutive-read group (shared across render slots). */
+interface ReadGroupMember {
+	toolCallId: string;
+	path: string;
+	details: Any;
+	isError: boolean;
+	/** First line of the error output, for the grouped `failed` row. */
+	errorText?: string;
+	/** Result carried an image part (image reads have no details.kind). */
+	hasImage: boolean;
+	invalidate?: () => void;
+}
+
+/**
+ * Group membership store, anchored on globalThis like the snapshot store so
+ * separately-installed packages (each with their own copy of this module)
+ * still collapse into one `• Read (N)` widget.
+ */
+const READ_GROUP_RENDER_KEY = Symbol.for("omp-tools.read-group-render.v1");
+const renderGlobals = globalThis as Record<PropertyKey, unknown>;
+renderGlobals[READ_GROUP_RENDER_KEY] ??= new Map<string, ReadGroupMember[]>();
+const readRenderGroups = renderGlobals[READ_GROUP_RENDER_KEY] as Map<string, ReadGroupMember[]>;
+
+/**
+ * Insertion-order eviction, mirroring the registry's byCall cap: groups this
+ * far back can only re-render from deep scrollback, where a re-formed
+ * (uncollapsed) group is an acceptable trade for not retaining member
+ * details and host component closures forever.
+ */
+const READ_GROUP_RENDER_CAP = 256;
+function pruneReadRenderGroups(): void {
+	if (readRenderGroups.size <= READ_GROUP_RENDER_CAP) return;
+	for (const key of readRenderGroups.keys()) {
+		if (readRenderGroups.size <= READ_GROUP_RENDER_CAP / 2) break;
+		readRenderGroups.delete(key);
+	}
+}
+
+function dirLabel(path: string): string {
+	return `${path.replace(/\/+$/, "")}/`;
+}
+
+/** `├─ 🟦 name.ts   8.1KB` rows with the size/count column right-aligned. */
+function dirTreeRows(R: RenderSupport, theme: Any, details: Any, expanded: boolean): string[] {
+	const all = (Array.isArray(details.entries) ? details.entries : []) as DirEntryDetail[];
+	const total = typeof details.total === "number" ? details.total : all.length;
+	const cap = expanded ? EXPANDED_LINES : COLLAPSED_TREE_LINES;
+	const shown = all.slice(0, cap);
+	const hidden = all.length - shown.length + Math.max(0, total - all.length);
+	const nameOf = (entry: DirEntryDetail) => (entry.dir ? `${entry.name}/` : entry.name);
+	const rightOf = (entry: DirEntryDetail) =>
+		entry.dir ? (typeof entry.count === "number" ? `(${entry.count})` : "") : (entry.size ?? "");
+	const nameWidth = Math.max(0, ...shown.map(entry => vw(R, nameOf(entry))));
+	const rightWidth = Math.max(0, ...shown.map(entry => vw(R, rightOf(entry))));
+	const rows = shown.map((entry, index) => {
+		const last = index === shown.length - 1 && hidden === 0;
+		const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+		const icon = fg(theme, "muted", entry.link !== undefined ? "🔗" : fileIcon(entry.name, entry.dir === true));
+		const name = nameOf(entry);
+		const padded = name + " ".repeat(Math.max(0, nameWidth - vw(R, name)));
+		if (entry.link !== undefined) {
+			return `${prefix}${icon} ${fg(theme, "toolOutput", padded)} ${fg(theme, "dim", `→ ${entry.link}`)}`;
+		}
+		const label = entry.dir ? fg(theme, "accent", padded) : fg(theme, "toolOutput", padded);
+		const right = rightOf(entry);
+		const rightCell = right.length > 0 ? fg(theme, "dim", `  ${" ".repeat(Math.max(0, rightWidth - vw(R, right)))}${right}`) : "";
+		return `${prefix}${icon} ${label}${rightCell}`;
+	});
+	if (hidden > 0) rows.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, hidden, expanded, "entries"));
+	return rows;
+}
+
+/** Boxless omp-style tree for a solo directory read. */
+function soloDirComponent(R: RenderSupport, theme: Any, details: Any, shownPath: string, expanded: boolean): Any {
+	const entries = Array.isArray(details.entries) ? details.entries : [];
+	const total = typeof details.total === "number" ? details.total : entries.length;
+	const header = statusLine(theme, {
+		icon: `${fileIcon(shownPath, true)} ${statusIcon(theme, "done")}`,
+		title: "Read",
+		description: fg(theme, "accent", dirLabel(shownPath)) + fg(theme, "dim", ` · ${total} entr${total === 1 ? "y" : "ies"}`),
+	});
+	return lineText(R, [header, ...dirTreeRows(R, theme, details, expanded)]);
+}
+
+/** ` · 7 entries` / ` · 120 lines` style summary for one grouped read row. */
+function readMemberMeta(member: ReadGroupMember): string {
+	const details = member.details;
+	if (!details || typeof details !== "object" || typeof details.kind !== "string") {
+		return member.hasImage ? "image" : "";
+	}
+	switch (details.kind) {
+		case "text": {
+			const shown = Array.isArray(details.rows) ? details.rows.length : 0;
+			const total =
+				typeof details.totalLines === "number"
+					? details.totalLines
+					: shown + (typeof details.moreLines === "number" ? details.moreLines : 0);
+			if (shown > 0 && total > shown) return `${shown} of ${total} lines`;
+			const count = total || shown;
+			return `${count} line${count === 1 ? "" : "s"}`;
+		}
+		case "dir": {
+			const entries = Array.isArray(details.entries) ? details.entries.length : 0;
+			const total = typeof details.total === "number" ? details.total : entries;
+			return `${total} entr${total === 1 ? "y" : "ies"}`;
+		}
+		default:
+			return String(details.kind);
+	}
+}
+
+/** omp's collapsed read log: `• Read (N)` with one `├─ path · meta` row each. */
+function readGroupLines(R: RenderSupport, theme: Any, members: ReadGroupMember[], expanded: boolean): string[] {
+	const header = plainHeader(theme, statusIcon(theme, "done"), `Read (${members.length})`);
+	const rows = members.map(member => {
+		const isDir = member.details?.kind === "dir";
+		const icon = fg(theme, "muted", fileIcon(member.path, isDir));
+		if (member.isError) {
+			const brief = member.errorText ? fg(theme, "dim", ` · ${member.errorText}`) : "";
+			return `${icon} ${statusIcon(theme, "error")} ${fg(theme, "accent", member.path)}${fg(theme, "dim", " · ")}${fg(theme, "error", "failed")}${brief}`;
+		}
+		const label = isDir
+			? fg(theme, "accent", dirLabel(member.path))
+			: pathLabel(theme, member.path, typeof member.details?.tag === "string" ? member.details.tag : undefined);
+		const meta = readMemberMeta(member);
+		return `${icon} ${label}${meta ? fg(theme, "dim", ` · ${meta}`) : ""}`;
+	});
+	const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_TREE_LINES);
+	const lines = shown.map(
+		(row, index) => fg(theme, "dim", index === shown.length - 1 && hidden === 0 ? TREE.last : TREE.branch) + row,
+	);
+	if (hidden > 0) lines.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, hidden, expanded, "reads"));
+	return [header, ...lines];
+}
+
+/** The pre-grouping single-read view: dir tree, code rows, or body dump. */
+function soloReadComponent(
+	R: RenderSupport,
+	theme: Any,
+	result: Any,
+	details: Any,
+	context: Any,
+	shownPath: string,
+	expanded: boolean,
+): Any {
+	if (context?.isError) return errorBox(R, theme, "Read", shownPath, result);
+	if (!details?.kind) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+	if (details.kind === "dir" && Array.isArray(details.entries)) {
+		return soloDirComponent(R, theme, details, shownPath, expanded);
+	}
+
+	let rows: string[];
+	let lineSuffix = "";
+	if (details.kind === "text" && Array.isArray(details.rows)) {
+		const language = details.language ?? languageFor(R, details.path);
+		rows = codeRows(R, theme, details.rows, { language });
+		const total = details.rows.length + (details.moreLines ?? 0);
+		lineSuffix = fg(theme, "dim", ` · ${total} line${total === 1 ? "" : "s"}`);
+	} else if (typeof details.body === "string") {
+		rows = details.body.split("\n").map((line: string) => fg(theme, "toolOutput", line));
+	} else {
+		return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+	}
+	const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES);
+	const totalHidden = hidden + (details.kind === "text" ? (details.moreLines ?? 0) : 0);
+	const tail = moreLine(R, theme, totalHidden, expanded);
+	if (tail) shown.push(tail);
+	return boxed(R, theme, {
+		header: statusLine(theme, {
+			icon: `${fileIcon(shownPath, false)} ${statusIcon(theme, "done")}`,
+			title: "Read",
+			description: pathLabel(theme, shownPath, details.tag) + lineSuffix,
+		}),
+		sections: [{ rows: shown }],
+	});
+}
+
 export function readRenderers(R: RenderSupport): Renderers {
 	return {
 		renderCall(args, theme, context) {
@@ -561,34 +761,77 @@ export function readRenderers(R: RenderSupport): Renderers {
 			markDone(context);
 			const details = result?.details as Any;
 			const callArgs = context?.args as Any;
-			const shownPath = details?.path ?? callArgs?.path ?? "";
-			if (context?.isError) return errorBox(R, theme, "Read", shownPath, result);
-			if (!details?.kind) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+			const shownPath = String(details?.path ?? callArgs?.path ?? "");
+			const solo = () => soloReadComponent(R, theme, result, details, context, shownPath, expanded);
 
-			let rows: string[];
-			let lineSuffix = "";
-			if (details.kind === "text" && Array.isArray(details.rows)) {
-				const language = details.language ?? languageFor(R, details.path);
-				rows = codeRows(R, theme, details.rows, { language });
-				const total = details.rows.length + (details.moreLines ?? 0);
-				lineSuffix = fg(theme, "dim", ` · ${total} line${total === 1 ? "" : "s"}`);
-			} else if (typeof details.body === "string") {
-				rows = details.body.split("\n").map((line: string) => fg(theme, "toolOutput", line));
-			} else {
-				return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+			const toolCallId = typeof context?.toolCallId === "string" ? context.toolCallId : undefined;
+			// The stamped id is persisted with the session and therefore
+			// authoritative; the live tracker covers results that could not be
+			// stamped (errors are host-synthesized from a throw, no details).
+			const groupId =
+				(typeof details?.readGroup === "string" ? (details.readGroup as string) : undefined) ?? readGroupOf(toolCallId);
+			if (!toolCallId || !groupId) return solo();
+
+			let members = readRenderGroups.get(groupId);
+			if (!members) {
+				members = [];
+				readRenderGroups.set(groupId, members);
+				pruneReadRenderGroups();
 			}
-			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES);
-			const totalHidden = hidden + (details.kind === "text" ? (details.moreLines ?? 0) : 0);
-			const tail = moreLine(R, theme, totalHidden, expanded);
-			if (tail) shown.push(tail);
-			return boxed(R, theme, {
-				header: statusLine(theme, {
-					icon: `${fileIcon(shownPath, details.kind === "dir")} ${statusIcon(theme, "done")}`,
-					title: "Read",
-					description: pathLabel(theme, shownPath, details.tag) + lineSuffix,
-				}),
-				sections: [{ rows: shown }],
-			});
+			const isError = context?.isError === true;
+			const content = Array.isArray(result?.content) ? (result.content as Any[]) : [];
+			const member: ReadGroupMember = {
+				toolCallId,
+				path: shownPath || argText(callArgs?.path),
+				details,
+				isError,
+				...(isError
+					? {
+							errorText: textOf(result)
+								.split("\n")
+								.map(line => line.trim())
+								.find(line => line.length > 0)
+								?.slice(0, 80),
+						}
+					: {}),
+				hasImage: content.some(part => part && typeof part === "object" && part.type === "image"),
+				invalidate: typeof context?.invalidate === "function" ? () => context.invalidate() : undefined,
+			};
+			const existing = members.findIndex(entry => entry.toolCallId === toolCallId);
+			if (existing >= 0) {
+				members[existing] = member;
+			} else {
+				members.push(member);
+				// Collapse the previous members' slots; the newest renders the
+				// group. Deferred to a microtask: the host's invalidate()
+				// synchronously re-runs renderResult (pi/prime updateDisplay),
+				// so invalidating inside this call would mutually recurse
+				// between members until the stack overflows. Re-entrant calls
+				// hit the replace branch above and stop the cascade.
+				const others = members.filter(entry => entry.toolCallId !== toolCallId);
+				if (others.length > 0) {
+					queueMicrotask(() => {
+						for (const other of others) other.invalidate?.();
+					});
+				}
+			}
+
+			const group = members;
+			let soloComponent: Any | undefined;
+			return {
+				render(width: number): string[] {
+					if (group[group.length - 1]?.toolCallId !== toolCallId) return [];
+					if (group.length === 1) {
+						soloComponent ??= solo();
+						return soloComponent.render(width);
+					}
+					const max = Math.max(10, width || FALLBACK_WIDTH);
+					return ["", ...readGroupLines(R, theme, group, expanded).map(line => fit(R, line, max))];
+				},
+				invalidate(): void {
+					soloComponent?.invalidate?.();
+				},
+			};
 		},
 	};
 }
@@ -697,7 +940,7 @@ export function editRenderers(R: RenderSupport): Renderers {
 			for (const section of sections) {
 				const label = pathLabel(theme, section.path, section.tag);
 				if (section.op === "delete") {
-					inline.push(statusLine(theme, { icon: "🗑", title: "Delete", description: label }));
+					inline.push(statusLine(theme, { icon: fg(theme, "error", "✘"), title: "Delete", description: label }));
 					continue;
 				}
 				if (section.op === "noop") {
@@ -715,10 +958,14 @@ export function editRenderers(R: RenderSupport): Renderers {
 					badge: diffStatsBadge(theme, stats.added, stats.removed),
 				});
 				const rows: string[] = [];
-				if (section.moveFrom) rows.push(fg(theme, "dim", `moved from ${section.moveFrom}`));
+				if (section.moveFrom) {
+					rows.push(`${fg(theme, "dim", "moved from")} ${fg(theme, "accent", String(section.moveFrom))}`);
+				}
 				rows.push(...diffFrameRows(R, theme, diff, languageFor(R, section.path)));
 				for (const resolution of section.blockResolutions ?? []) {
-					rows.push(fg(theme, "dim", `block ${resolution.anchor}* → ${resolution.start}.=${resolution.end}`));
+					rows.push(
+						`${fg(theme, "dim", "block")} ${fg(theme, "accent", `${resolution.anchor}*`)} ${fg(theme, "dim", "→")} ${fg(theme, "accent", `${resolution.start}.=${resolution.end}`)}`,
+					);
 				}
 				for (const warning of section.warnings ?? []) {
 					rows.push(`${statusIcon(theme, "warning")} ${fg(theme, "warning", warning)}`);
@@ -727,7 +974,7 @@ export function editRenderers(R: RenderSupport): Renderers {
 					headerLine = line;
 					boxSections.push({ rows });
 				} else {
-					boxSections.push({ label: stripAnsi(line), rows });
+					boxSections.push({ label, rows });
 				}
 			}
 
@@ -860,10 +1107,14 @@ function matchGutterRows(
 	for (const row of rows) {
 		if (previous > 0 && row.n > previous + 1) out.push(fg(theme, "dim", "⋮"));
 		previous = row.n;
-		const marker = row.isMatch === false ? " " : "*";
-		const gutter = fg(theme, "dim", `${`${marker}${String(row.n)}`.padStart(width + 1)}│`);
+		const hit = row.isMatch !== false;
+		const marker = hit ? "*" : " ";
+		const gutterNum = `${marker}${String(row.n)}`.padStart(width + 1);
+		const gutter = hit
+			? fg(theme, "accent", `${gutterNum}│`)
+			: fg(theme, "dim", `${gutterNum}│`);
 		let content = row.text;
-		if (matchRe && row.isMatch !== false) {
+		if (matchRe && hit) {
 			try {
 				matchRe.lastIndex = 0;
 				content = content.replace(matchRe, m => inverse(theme, m));
@@ -871,7 +1122,7 @@ function matchGutterRows(
 				/* keep plain */
 			}
 		}
-		out.push(gutter + fg(theme, "toolOutput", content));
+		out.push(gutter + fg(theme, hit ? "toolOutput" : "toolDiffContext", content));
 	}
 	return out;
 }
@@ -894,15 +1145,15 @@ function searchLikeResult(
 		return sum + fileRows.filter((row: Any) => row.isMatch !== false).length + (file.more ?? 0);
 	}, 0);
 	const meta: string[] = [
-		`${matches} match${matches === 1 ? "" : "es"}`,
-		`${opts.files.length} file${opts.files.length === 1 ? "" : "s"}`,
+		fg(theme, matches > 0 ? "success" : "warning", `${matches} match${matches === 1 ? "" : "es"}`),
+		fg(theme, "accent", `${opts.files.length} file${opts.files.length === 1 ? "" : "s"}`),
 	];
 	if (opts.scope) meta.push(`in ${opts.scope}`);
-	if (opts.summary && /next: skip/.test(opts.summary)) meta.push("truncated");
+	if (opts.summary && /next: skip/.test(opts.summary)) meta.push(fg(theme, "warning", "truncated"));
 	const header = statusLine(theme, {
-		icon: fg(theme, "toolTitle", "🔍"),
+		icon: fg(theme, "accent", "⌕"),
 		title: opts.title,
-		description: fg(theme, "muted", opts.pattern),
+		description: fg(theme, "accent", opts.pattern),
 		meta,
 	});
 
@@ -924,10 +1175,10 @@ function noMatches(R: RenderSupport, theme: Any, title: string, pattern: string,
 		statusLine(theme, {
 			icon: statusIcon(theme, "warning"),
 			title,
-			description: fg(theme, "muted", pattern),
-			meta: ["0 matches"],
+			description: fg(theme, "accent", pattern),
+			meta: [fg(theme, "warning", "0 matches")],
 		}),
-		`${statusIcon(theme, "warning")} ${fg(theme, "muted", extra ?? "No matches found")}`,
+		`${statusIcon(theme, "warning")} ${fg(theme, "warning", extra ?? "No matches found")}`,
 	]);
 }
 
@@ -1041,10 +1292,13 @@ export function findRenderers(R: RenderSupport): Renderers {
 				]);
 			}
 			const header = statusLine(theme, {
-				icon: fg(theme, "toolTitle", "🔍"),
+				icon: fg(theme, "accent", "⌕"),
 				title: "Find",
-				description: fg(theme, "muted", scope),
-				meta: [`${details.total} path${details.total === 1 ? "" : "s"}`, "newest first"],
+				description: fg(theme, "accent", scope),
+				meta: [
+					fg(theme, "success", `${details.total} path${details.total === 1 ? "" : "s"}`),
+					"newest first",
+				],
 			});
 			const cap = expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS;
 			const entries = (details.paths as Any[]).slice(0, cap);
@@ -1052,9 +1306,9 @@ export function findRenderers(R: RenderSupport): Renderers {
 			const rows = entries.map((entry, index) => {
 				const last = index === entries.length - 1 && hidden === 0;
 				const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
-				const icon = fg(theme, "muted", fileIcon(entry.path, entry.isDir === true));
-				const label = entry.isDir ? fg(theme, "accent", `${entry.path}/`) : fg(theme, "toolOutput", entry.path);
-				return `${prefix}${icon} ${label}`;
+				const mark = entry.isDir === true ? fg(theme, "accent", "d") : fg(theme, "muted", "f");
+				const label = entry.isDir ? fg(theme, "accent", `${entry.path}/`) : fg(theme, "accent", entry.path);
+				return `${prefix}${mark} ${label}`;
 			});
 			if (hidden > 0) rows.push(fg(theme, "dim", TREE.last) + moreLine(R, theme, hidden, expanded, "files"));
 			return lineText(R, [header, ...rows]);
@@ -1079,15 +1333,15 @@ function todoTaskRow(theme: Any, task: Any): string {
 	const content = String(task.content ?? "");
 	switch (task.status) {
 		case "completed":
-			return fg(theme, "success", `☑ ${strike(theme, content)}`);
+			return `${fg(theme, "success", "[x]")} ${fg(theme, "success", strike(theme, content))} ${fg(theme, "dim", "done")}`;
 		case "in_progress":
-			return fg(theme, "accent", `☐ ${content}`);
+			return `${fg(theme, "warning", "[>]")} ${bold(theme, fg(theme, "accent", content))} ${fg(theme, "warning", "in progress")}`;
 		case "dropped":
-			return fg(theme, "error", `☐ ${strike(theme, content)}`);
+			return `${fg(theme, "error", "[-]")} ${fg(theme, "error", strike(theme, content))} ${fg(theme, "dim", "dropped")}`;
 		case "blocked":
-			return fg(theme, "warning", `☐ ${content}${task.reason ? ` (blocked: ${task.reason})` : " (blocked)"}`);
+			return `${fg(theme, "warning", "[!]")} ${fg(theme, "warning", content)}${task.reason ? fg(theme, "dim", ` (blocked: ${task.reason})`) : fg(theme, "dim", " (blocked)")}`;
 		default:
-			return fg(theme, "dim", `☐ ${content}`);
+			return `${fg(theme, "muted", "[ ]")} ${fg(theme, "muted", content)} ${fg(theme, "dim", "pending")}`;
 	}
 }
 
@@ -1122,6 +1376,10 @@ export function todoRenderers(R: RenderSupport): Renderers {
 
 			const multi = phases.length > 1;
 			const rows: string[] = [];
+			const completedTotal = phases.reduce(
+				(sum, phase) => sum + ((phase.tasks ?? []) as Any[]).filter(task => task.status === "completed").length,
+				0,
+			);
 			phases.forEach((phase, index) => {
 				const tasks = (phase.tasks ?? []) as Any[];
 				const done = tasks.filter(task => task.status === "completed").length;
@@ -1129,9 +1387,12 @@ export function todoRenderers(R: RenderSupport): Renderers {
 				const named = callArgs?.phase === phase.name || tasks.some(task => task.content === callArgs?.task);
 				const numeral = ROMAN[index] ?? String(index + 1);
 				if (multi) {
-					// Untouched phases fold to one summary row when collapsed.
 					if (!expanded && !active && !named) {
-						rows.push(fg(theme, "dim", bold(theme, `${numeral}. ${phase.name}  ${done}/${tasks.length}`)));
+						const fraction = `${done}/${tasks.length}`;
+						const fractionColor = done === tasks.length ? "success" : done > 0 ? "warning" : "dim";
+						rows.push(
+							`${fg(theme, "dim", bold(theme, `${numeral}. ${phase.name}`))}  ${fg(theme, fractionColor, bold(theme, fraction))}`,
+						);
 						return;
 					}
 					rows.push(fg(theme, "accent", bold(theme, `${numeral}. ${phase.name}`)));
@@ -1145,8 +1406,13 @@ export function todoRenderers(R: RenderSupport): Renderers {
 			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_TREE_LINES);
 			const tail = moreLine(R, theme, hidden, expanded, "tasks");
 			if (tail) shown.push(tail);
+			const progress =
+				total > 0 ? fg(theme, completedTotal === total ? "success" : "warning", `${completedTotal}/${total}`) : "";
 			return boxed(R, theme, {
-				header: plainHeader(theme, fg(theme, "accent", "☑"), "Todo", [`${total} task${total === 1 ? "" : "s"}`]),
+				header: plainHeader(theme, fg(theme, "accent", "☑"), "Todo", [
+					`${total} task${total === 1 ? "" : "s"}`,
+					...(progress ? [progress] : []),
+				]),
 				sections: [{ rows: shown }],
 			});
 		},
@@ -1214,12 +1480,12 @@ function ageOf(iso: unknown): string {
 	return iso.slice(0, 10);
 }
 
-function githubMeta(args: Any): string[] {
+function githubMeta(theme: Any, args: Any): string[] {
 	const meta: string[] = [];
-	if (typeof args?.repo === "string") meta.push(args.repo);
-	if (typeof args?.pr === "string") meta.push(`pr ${args.pr}`);
-	if (typeof args?.query === "string") meta.push(args.query);
-	if (typeof args?.path === "string") meta.push(args.path);
+	if (typeof args?.repo === "string") meta.push(fg(theme, "accent", args.repo));
+	if (typeof args?.pr === "string") meta.push(`${fg(theme, "dim", "pr")} ${fg(theme, "accent", args.pr)}`);
+	if (typeof args?.query === "string") meta.push(fg(theme, "accent", args.query));
+	if (typeof args?.path === "string") meta.push(fg(theme, "accent", args.path));
 	return meta;
 }
 
@@ -1302,7 +1568,7 @@ function ghIssuePrBox(
 	const header = [
 		fg(theme, "accent", "⎇"),
 		fg(theme, "toolTitle", bold(theme, `${kind} #${data.number ?? "?"}`)),
-		String(data.title ?? "Untitled"),
+		fg(theme, "toolOutput", String(data.title ?? "Untitled")),
 		stateBadge(theme, state),
 	]
 		.filter(part => part.length > 0)
@@ -1313,9 +1579,9 @@ function ghIssuePrBox(
 		factParts.push(`${fg(theme, "accent", String(data.headRefName))} ${fg(theme, "dim", "→")} ${fg(theme, "accent", String(data.baseRefName ?? "?"))}`);
 	}
 	const author = ghUserLabel(data.author);
-	if (author) factParts.push(author);
+	if (author) factParts.push(fg(theme, "accent", author));
 	const age = ageOf(data.createdAt);
-	if (age) factParts.push(`opened ${age}`);
+	if (age) factParts.push(fg(theme, "dim", `opened ${age}`));
 	const facts: string[] = [factParts.join(fg(theme, "dim", " · "))];
 
 	const factParts2: string[] = [];
@@ -1325,7 +1591,7 @@ function ghIssuePrBox(
 	if (labelNames.length > 0) factParts2.push(`Labels ${fg(theme, "muted", labelNames.join(", "))}`);
 	if (data.stateReason) factParts2.push(`Reason ${fg(theme, "muted", String(data.stateReason))}`);
 	if (factParts2.length > 0) facts.push(factParts2.join(fg(theme, "dim", " · ")));
-	if (data.url) facts.push(fg(theme, "dim", String(data.url)));
+	if (data.url) facts.push(fg(theme, "accent", String(data.url)));
 
 	const sections: BoxSection[] = [{ rows: facts }];
 
@@ -1451,7 +1717,7 @@ function ghRunWatchBox(R: RenderSupport, theme: Any, details: Any, expanded: boo
 	const header = [
 		fg(theme, "accent", "⎇"),
 		fg(theme, "toolTitle", bold(theme, "Run Watch")),
-		String(first.workflowName ?? first.displayTitle ?? ""),
+		fg(theme, "toolOutput", String(first.workflowName ?? first.displayTitle ?? "")),
 		stateBadge(theme, details.state === "completed" ? (first.conclusion ?? "completed") : "running"),
 		fg(theme, "dim", [details.repo, first.headBranch, first.headSha?.slice(0, 7)].filter(Boolean).join(" · ")),
 	]
@@ -1462,7 +1728,10 @@ function ghRunWatchBox(R: RenderSupport, theme: Any, details: Any, expanded: boo
 	for (const run of runs) {
 		if (rows.length > 0) rows.push("");
 		const runLabel = String(run.workflowName ?? run.displayTitle ?? "workflow");
-		rows.push(`${runStateIcon(theme, run.conclusion, run.status)} ${fg(theme, "toolOutput", runLabel)} ${fg(theme, "dim", String(run.conclusion || run.status || ""))}`);
+		const runState = String(run.conclusion || run.status || "");
+		rows.push(
+			`${runStateIcon(theme, run.conclusion, run.status)} ${fg(theme, "toolOutput", runLabel)} ${runState ? stateBadge(theme, runState) : ""}`,
+		);
 		const jobs = (run.jobs ?? []) as Any[];
 		jobs.forEach((job, index) => {
 			const prefix = fg(theme, "dim", `  ${index === jobs.length - 1 ? TREE.last : TREE.branch}`);
@@ -1491,7 +1760,7 @@ export function githubRenderers(R: RenderSupport): Renderers {
 	return {
 		renderCall(args, theme, context) {
 			const title = GITHUB_OP_TITLES[argText(args?.op)] ?? "GitHub";
-			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title, meta: githubMeta(args) });
+			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title, meta: githubMeta(theme, args) });
 			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -1500,7 +1769,7 @@ export function githubRenderers(R: RenderSupport): Renderers {
 			const callArgs = context?.args as Any;
 			const op = argText(details?.op ?? callArgs?.op);
 			const title = GITHUB_OP_TITLES[op] ?? "GitHub";
-			if (context?.isError) return errorBox(R, theme, title, githubMeta(callArgs).join(" "), result);
+			if (context?.isError) return errorBox(R, theme, title, stripAnsi(githubMeta(theme, callArgs).join(" ")), result);
 			const icon = fg(theme, "accent", "⎇");
 			const data = details?.data as Any;
 
@@ -1533,10 +1802,10 @@ export function githubRenderers(R: RenderSupport): Renderers {
 					return group;
 				});
 				const header = statusLine(theme, {
-					icon: fg(theme, "toolTitle", "🔍"),
+					icon: fg(theme, "accent", "⌕"),
 					title,
-					description: fg(theme, "muted", argText(callArgs?.query)),
-					meta: [`${items.length} result${items.length === 1 ? "" : "s"}`],
+					description: fg(theme, "accent", argText(callArgs?.query)),
+					meta: [fg(theme, "success", `${items.length} result${items.length === 1 ? "" : "s"}`)],
 				});
 				const body = treeRows(theme, groups);
 				const windowed = bodyWindow(body, expanded, COLLAPSED_TREE_LINES);
@@ -1548,10 +1817,10 @@ export function githubRenderers(R: RenderSupport): Renderers {
 				const items = data.items as Any[];
 				if (items.length === 0) return noMatches(R, theme, title, argText(callArgs?.query));
 				const header = statusLine(theme, {
-					icon: fg(theme, "toolTitle", "🔍"),
+					icon: fg(theme, "accent", "⌕"),
 					title,
-					description: fg(theme, "muted", argText(callArgs?.query)),
-					meta: [`${items.length} result${items.length === 1 ? "" : "s"}`],
+					description: fg(theme, "accent", argText(callArgs?.query)),
+					meta: [fg(theme, "success", `${items.length} result${items.length === 1 ? "" : "s"}`)],
 				});
 				return lineText(R, [header, ...ghSearchRows(theme, items, expanded ? EXPANDED_LINES : COLLAPSED_LIST_ITEMS)]);
 			}
@@ -1560,7 +1829,7 @@ export function githubRenderers(R: RenderSupport): Renderers {
 				const headerParts = [
 					statusIcon(theme, "success"),
 					fg(theme, "toolTitle", bold(theme, "GitHub PR Create:")),
-					details.title ? String(details.title) : "",
+					details.title ? fg(theme, "toolOutput", String(details.title)) : "",
 					stateBadge(theme, details.draft === true ? "draft" : "open"),
 				].filter((part: string) => part.length > 0);
 				const factRow =
@@ -1630,7 +1899,7 @@ export function githubRenderers(R: RenderSupport): Renderers {
 			const { shown, hidden } = bodyWindow(rows, expanded, 20);
 			const tail = moreLine(R, theme, hidden, expanded);
 			if (tail) shown.push(tail);
-			return boxed(R, theme, { header: plainHeader(theme, icon, title, githubMeta(callArgs)), sections: [{ rows: shown }] });
+			return boxed(R, theme, { header: plainHeader(theme, icon, title, githubMeta(theme, callArgs)), sections: [{ rows: shown }] });
 		},
 	};
 }
@@ -1688,14 +1957,14 @@ export function webSearchRenderers(R: RenderSupport): Renderers {
 				header: statusLine(theme, {
 					icon: ok ? fg(theme, "accent", "⌕") : statusIcon(theme, "warning"),
 					title: "Web Search",
-					description: fg(theme, "muted", details.provider),
-					meta: [`${citations.length} source${citations.length === 1 ? "" : "s"}`],
+					description: fg(theme, "accent", details.provider),
+					meta: [fg(theme, ok ? "success" : "warning", `${citations.length} source${citations.length === 1 ? "" : "s"}`)],
 				}),
 				sections: [
-					{ rows: [`${fg(theme, "muted", "Query:")} ${query}`] },
+					{ rows: [`${fg(theme, "muted", "Query:")} ${fg(theme, "accent", query)}`] },
 					{ label: "Answer", rows: shown },
 					{ label: "Sources", rows: sourceRows },
-					{ label: "Metadata", rows: [`${fg(theme, "muted", "Provider:")} ${details.provider}`] },
+					{ label: "Metadata", rows: [`${fg(theme, "muted", "Provider:")} ${fg(theme, "accent", details.provider)}`] },
 				],
 			});
 		},
@@ -1714,7 +1983,7 @@ export function inspectImageRenderers(R: RenderSupport): Renderers {
 					title: "Inspect",
 					description: fg(theme, "accent", argText(args?.path)),
 				}),
-				`${fg(theme, "dim", TREE.last)}${fg(theme, "muted", "Question:")} ${question.length > 100 ? `${question.slice(0, 99)}…` : question}`,
+				`${fg(theme, "dim", TREE.last)}${fg(theme, "muted", "Question:")} ${fg(theme, "accent", question.length > 100 ? `${question.slice(0, 99)}…` : question)}`,
 			];
 			return pendingCall(R, context, lines);
 		},
@@ -1728,7 +1997,7 @@ export function inspectImageRenderers(R: RenderSupport): Renderers {
 			if (typeof details?.model === "string") meta.push(details.model);
 			if (typeof details?.mimeType === "string") meta.push(details.mimeType);
 			const header = statusLine(theme, {
-				icon: fg(theme, "accent", "🖼"),
+				icon: fg(theme, "accent", "▣"),
 				title: "Inspect",
 				description: fg(theme, "accent", path) + (meta.length > 0 ? fg(theme, "dim", ` · ${meta.join(" · ")}`) : ""),
 			});
@@ -1784,9 +2053,8 @@ export function browserRenderers(R: RenderSupport): Renderers {
 					invalidate(): void {},
 				};
 			}
-			const meta: string[] = [];
-			if (typeof args?.url === "string") meta.push(args.url);
-			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title: browserTitle(action, args), meta });
+			const description = typeof args?.url === "string" ? fg(theme, "accent", args.url) : undefined;
+			const line = statusLine(theme, { icon: statusIcon(theme, "pending"), title: browserTitle(action, args), description });
 			return pendingCall(R, context, [line]);
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -1799,16 +2067,13 @@ export function browserRenderers(R: RenderSupport): Renderers {
 				.split("\n")
 				.filter(line => line.length > 0);
 			if (context?.isError) {
-				return lineText(R, [
-					plainHeader(theme, statusIcon(theme, "error"), title),
-					...lines.map(line => fg(theme, "error", line)),
-				]);
+				return errorBox(R, theme, title, typeof details?.url === "string" ? details.url : "", result);
 			}
 			if (action !== "run") {
 				const meta: string[] = [];
-				if (typeof details?.url === "string") meta.push(details.url);
+				if (typeof details?.url === "string") meta.push(fg(theme, "accent", details.url));
 				return lineText(R, [
-					plainHeader(theme, fg(theme, "accent", "🌐"), title, meta),
+					plainHeader(theme, fg(theme, "accent", "⌂"), title, meta),
 					...lines.map(line => fg(theme, "toolOutput", line)),
 				]);
 			}

@@ -18,7 +18,7 @@ import {
 	WRITE_DESCRIPTION,
 } from "./descriptions.ts";
 import type { PiApi } from "./host.ts";
-import { ensurePromptContract, registeredTools } from "./registry.ts";
+import { ensurePromptContract, registeredTools, stampReadGroup } from "./registry.ts";
 import {
 	astEditRenderers,
 	astGrepRenderers,
@@ -55,8 +55,12 @@ export async function registerRead(pi: PiApi): Promise<void> {
 			path: Type.String({ description: "file/dir/archive/sqlite/pdf/notebook path or URL, with optional :selectors" }),
 			limit: Type.Optional(Type.Number({ description: "max lines to return (default 2000)" })),
 		}),
-		async execute(_id: string, params: { path: string; limit?: number }, signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd?: string }) {
-			return executeRead(params.path, params.limit, ctx, signal);
+		async execute(toolCallId: string, params: { path: string; limit?: number }, signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd?: string }) {
+			const result = await executeRead(params.path, params.limit, ctx, signal);
+			// Group id persists in details so replayed sessions collapse
+			// consecutive reads exactly like the live render did.
+			stampReadGroup(toolCallId, result);
+			return result;
 		},
 	});
 }

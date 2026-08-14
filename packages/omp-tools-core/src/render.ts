@@ -2095,3 +2095,227 @@ export function browserRenderers(R: RenderSupport): Renderers {
 		},
 	};
 }
+
+/* --------------------------------- bash -------------------------------- */
+
+function bashCommandPreview(theme: Any, command: string): string {
+	const first = command.split("\n")[0] ?? "";
+	const preview = first.length > 80 ? `${first.slice(0, 79)}…` : first;
+	const more = command.includes("\n") ? fg(theme, "dim", " …") : "";
+	return fg(theme, "muted", "$ ") + fg(theme, "toolOutput", preview) + more;
+}
+
+export function bashRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			if (typeof args?.op === "string") {
+				const line = statusLine(theme, {
+					icon: statusIcon(theme, "pending"),
+					title: "Bash",
+					description: fg(theme, "accent", `${args.op}${typeof args?.job === "string" ? ` ${args.job}` : ""}`),
+				});
+				return pendingCall(R, context, [line]);
+			}
+			const meta: string[] = [];
+			if (args?.pty === true) meta.push("pty");
+			if (args?.async === true) meta.push("background");
+			if (typeof args?.cwd === "string") meta.push(`in ${args.cwd}`);
+			const line = statusLine(theme, {
+				icon: statusIcon(theme, "running"),
+				title: "Bash",
+				description: bashCommandPreview(theme, argText(args?.command)),
+				meta,
+			});
+			return pendingCall(R, context, [line]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			const details = result?.details as Any;
+			const callArgs = context?.args as Any;
+			const command = argText(callArgs?.command);
+			const running = details?.running === true;
+			if (!running) markDone(context);
+			if (context?.isError) return errorBox(R, theme, "Bash", command.split("\n")[0] ?? "", result);
+
+
+			const rows = textOf(result)
+				.split("\n")
+				.map(line => fg(theme, "toolOutput", line));
+			const { shown, hidden } = bodyWindow(rows, expanded, COLLAPSED_CODE_LINES);
+			const tail = moreLine(R, theme, hidden, expanded);
+			if (tail) shown.push(tail);
+
+			const meta: string[] = [];
+			if (running) meta.push(fg(theme, "accent", "running"));
+			else if (details?.timedOut === true) meta.push(fg(theme, "warning", "timeout"));
+			else if (typeof details?.exitCode === "number" && details.exitCode !== 0) {
+				meta.push(fg(theme, "error", `exit ${details.exitCode}`));
+			}
+			if (typeof details?.wallTimeMs === "number") {
+				const ms = details.wallTimeMs;
+				meta.push(ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
+			}
+			if (typeof details?.jobId === "string") meta.push(`job ${details.jobId}`);
+			if (callArgs?.pty === true) meta.push("pty");
+
+			const failed = !running && ((typeof details?.exitCode === "number" && details.exitCode !== 0) || details?.timedOut === true);
+			const icon = running ? statusIcon(theme, "running") : failed ? statusIcon(theme, "warning") : statusIcon(theme, "success");
+			const header = statusLine(theme, {
+				icon,
+				title: "Bash",
+				description: typeof callArgs?.op === "string"
+					? fg(theme, "accent", `${callArgs.op}${typeof callArgs?.job === "string" ? ` ${callArgs.job}` : ""}`)
+					: bashCommandPreview(theme, command),
+				meta,
+			});
+			if (shown.length === 0 || (shown.length === 1 && stripAnsi(shown[0] ?? "").trim() === "")) {
+				return lineText(R, [header, fg(theme, "dim", "(no output)")]);
+			}
+			return boxed(R, theme, { header, sections: [{ rows: shown }] });
+		},
+	};
+}
+
+/* --------------------------------- task -------------------------------- */
+
+interface TaskRunDetail {
+	name?: string;
+	agent?: string;
+	ok?: boolean;
+	exitCode?: number;
+	wallTimeMs?: number;
+	finalText?: string;
+	isolated?: boolean;
+	applied?: boolean;
+	notice?: string;
+}
+
+export function taskRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const items = (Array.isArray(args?.tasks) ? args.tasks : []) as Any[];
+			const header = statusLine(theme, {
+				icon: statusIcon(theme, "running"),
+				title: "Task",
+				description: fg(theme, "muted", `${items.length || 1} subagent${(items.length || 1) === 1 ? "" : "s"}`),
+			});
+			const rows = items.slice(0, COLLAPSED_LIST_ITEMS).map((item, index) => {
+				const last = index === Math.min(items.length, COLLAPSED_LIST_ITEMS) - 1;
+				const name = typeof item?.name === "string" ? item.name : `#${index + 1}`;
+				const brief = typeof item?.task === "string" ? item.task.split("\n")[0]?.slice(0, 70) : "";
+				const iso = item?.isolated === true ? fg(theme, "dim", " ⟦isolated⟧") : "";
+				return `${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "accent", name)}${iso}${brief ? fg(theme, "dim", ` · ${brief}`) : ""}`;
+			});
+			return pendingCall(R, context, [header, ...rows]);
+		},
+		renderResult(result, { expanded }, theme, context) {
+			const details = result?.details as Any;
+			const running = details?.running === true;
+			if (!running) markDone(context);
+			if (context?.isError) return errorBox(R, theme, "Task", "", result);
+
+			if (running) {
+				const rows = (Array.isArray(details?.rows) ? details.rows : []) as string[];
+				const shown = rows.map((row, index) => {
+					const last = index === rows.length - 1;
+					return `${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "toolOutput", row)}`;
+				});
+				const header = statusLine(theme, {
+					icon: statusIcon(theme, "running"),
+					title: "Task",
+					description: fg(theme, "muted", `${rows.length} subagent${rows.length === 1 ? "" : "s"}`),
+				});
+				return lineText(R, [header, ...shown]);
+			}
+
+			const runs = (Array.isArray(details?.tasks) ? details.tasks : []) as TaskRunDetail[];
+			if (runs.length === 0) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+			const failed = typeof details?.failed === "number" ? details.failed : runs.filter(run => run.ok === false).length;
+			const sections: BoxSection[] = runs.map(run => {
+				const state = run.ok ? statusIcon(theme, "success") : statusIcon(theme, "error");
+				const wall = typeof run.wallTimeMs === "number"
+					? run.wallTimeMs < 60_000
+						? `${Math.round(run.wallTimeMs / 1000)}s`
+						: `${Math.floor(run.wallTimeMs / 60_000)}m${Math.round((run.wallTimeMs % 60_000) / 1000)}s`
+					: "";
+				const iso = run.isolated === true ? (run.applied === true ? " ⟦applied⟧" : " ⟦isolated⟧") : "";
+				const bodyRows = (run.finalText ?? "").split("\n").map(line => fg(theme, "toolOutput", line));
+				const { shown, hidden } = bodyWindow(bodyRows, expanded, COLLAPSED_CODE_LINES);
+				const tail = moreLine(R, theme, hidden, expanded);
+				if (tail) shown.push(tail);
+				if (run.notice) shown.push(fg(theme, "dim", `[${run.notice}]`));
+				return {
+					label: `${state} ${run.name ?? "?"} (${run.agent ?? "task"})${iso}${wall ? ` · ${wall}` : ""}`,
+					rows: shown,
+				};
+			});
+			const header = statusLine(theme, {
+				icon: failed > 0 ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
+				title: "Task",
+				description: fg(theme, "muted", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`),
+				meta: [fg(theme, failed > 0 ? "warning" : "success", `${runs.length - failed} completed${failed > 0 ? `, ${failed} failed` : ""}`)],
+			});
+			return boxed(R, theme, { header, sections });
+		},
+	};
+}
+
+/* ---------------------------------- ask --------------------------------- */
+
+interface AskResultDetail {
+	question?: string;
+	selectedOptions?: string[];
+	customInput?: string;
+	cancelled?: boolean;
+}
+
+export function askRenderers(R: RenderSupport): Renderers {
+	return {
+		renderCall(args, theme, context) {
+			const questions = (Array.isArray(args?.questions) ? args.questions : []) as Any[];
+			const first = questions[0];
+			const header = statusLine(theme, {
+				icon: fg(theme, "accent", "?"),
+				title: "Ask",
+				description: fg(theme, "accent", typeof first?.question === "string" ? first.question : "…"),
+				meta: questions.length > 1 ? [`${questions.length} questions`] : [],
+			});
+			const rows: string[] = [];
+			for (const [index, question] of questions.slice(0, 1).entries()) {
+				const options = (Array.isArray(question?.options) ? question.options : []) as Any[];
+				for (const [optIndex, option] of options.entries()) {
+					const last = index === 0 && optIndex === options.length - 1 && questions.length === 1;
+					const marker = question?.multi === true ? "▢" : "◯";
+					const rec = question?.recommended === optIndex ? fg(theme, "dim", " (Recommended)") : "";
+					rows.push(
+						`${fg(theme, "dim", last ? TREE.last : TREE.branch)}${fg(theme, "muted", marker)} ${fg(theme, "toolOutput", String(option?.label ?? ""))}${rec}`,
+					);
+				}
+			}
+			return pendingCall(R, context, [header, ...rows]);
+		},
+		renderResult(result, { expanded: _expanded }, theme, context) {
+			markDone(context);
+			if (context?.isError) return errorBox(R, theme, "Ask", "", result);
+			const details = result?.details as Any;
+			const results = (Array.isArray(details?.results) ? details.results : []) as AskResultDetail[];
+			if (results.length === 0) return lineText(R, [fg(theme, "toolOutput", textOf(result))]);
+			const rows = results.map((entry, index) => {
+				const last = index === results.length - 1;
+				const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
+				const question = fg(theme, "muted", String(entry.question ?? ""));
+				if (entry.cancelled) return `${prefix}${question} ${fg(theme, "warning", "→ chat")}`;
+				const answers = [...(entry.selectedOptions ?? [])];
+				if (entry.customInput) answers.push(`“${entry.customInput}”`);
+				return `${prefix}${question} ${fg(theme, "dim", "→")} ${fg(theme, "accent", answers.join(", ") || "(none)")}`;
+			});
+			const chatRedirect = details?.chatRedirect === true;
+			const header = plainHeader(
+				theme,
+				chatRedirect ? statusIcon(theme, "warning") : statusIcon(theme, "success"),
+				"Ask",
+				[`${results.length} question${results.length === 1 ? "" : "s"}`],
+			);
+			return lineText(R, [header, ...rows]);
+		},
+	};
+}

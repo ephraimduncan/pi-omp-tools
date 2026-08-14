@@ -27,6 +27,12 @@ export interface ToolResult {
 /** Subset of the host ExtensionContext we rely on. */
 export interface ToolCtx {
 	cwd?: string;
+	/** True in TUI/RPC modes; false in print/JSON (pi/prime extension ctx). */
+	hasUI?: boolean;
+	/** Host run mode ("tui" | "rpc" | "json" | "print") when exposed. */
+	mode?: string;
+	/** Host dialog surface (select/input/confirm/…), when the host passes its full ctx. */
+	ui?: unknown;
 }
 
 export type ToolUpdate = (partial: ToolResult) => void;

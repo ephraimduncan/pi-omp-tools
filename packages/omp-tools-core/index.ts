@@ -68,6 +68,41 @@ export {
 	type TodoStatus,
 	type TodoTask,
 } from "./src/tools/todo.ts";
+export {
+	BASH_DESCRIPTION,
+	BASH_TIMEOUTS,
+	buildArgv,
+	clampBashTimeout,
+	executeBash,
+	pickShell,
+	registerBash,
+	type BashParams,
+} from "./src/tools/bash.ts";
+export {
+	discoverAgents,
+	executeTask,
+	generateAgentName,
+	parseAgentFile,
+	registerTask,
+	resolveHostCli,
+	TASK_DESCRIPTION,
+	type AgentDefinition,
+	type TaskItem,
+	type TaskParams,
+	type TaskRunResult,
+} from "./src/tools/task.ts";
+export {
+	ASK_DESCRIPTION,
+	CHAT_OPTION,
+	executeAsk,
+	OTHER_OPTION,
+	registerAsk,
+	type AskOption,
+	type AskParams,
+	type AskQuestion,
+	type AskQuestionResult,
+	type AskUi,
+} from "./src/tools/ask.ts";
 
 export {
 	buildGhArgs,

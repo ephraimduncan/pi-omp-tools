@@ -1,0 +1,39 @@
+{
+  "name": "@ephraimduncan/pi-bash",
+  "version": "0.1.0",
+  "description": "`bash` tool for pi/prime-agent: workspace shell with optional PTY and background-job dispatch",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "oh-my-pi",
+    "coding-agent",
+    "bash",
+    "shell"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "directory": "packages/pi-bash"
+  },
+  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-bash#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ephraimduncan/omp-tools-core": "^0.1.0"
+  }
+}

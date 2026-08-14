@@ -115,7 +115,10 @@ const TOOL_SUMMARIES: Record<string, string> = {
 	find: "find — glob path lookup (newest-first)",
 	ast_grep: "ast_grep — structural code queries via tree-sitter patterns",
 	ast_edit: "ast_edit — structural rewrites, previewed before apply",
+	bash: "bash — workspace shell with optional PTY and background-job dispatch",
 	todo: "todo — phased session task list; tasks referenced by verbatim content, earliest open task auto-promotes",
+	task: "task — fan out subagents in parallel, optionally workspace-isolated",
+	ask: "ask — structured follow-up questions for interactive runs",
 	web_search: "web_search — one web query (Exa or Parallel), answer plus citations",
 	github: "github — gh CLI ops: repos, files, PRs, issue/PR view, code search, Actions run-watch",
 	browser: "browser — persistent tabs over raw CDP (Obscura when installed, else Chromium); open once, then run JS with tab helpers",
@@ -130,7 +133,10 @@ const TOOL_ORDER = [
 	"find",
 	"ast_grep",
 	"ast_edit",
+	"bash",
 	"todo",
+	"task",
+	"ask",
 	"web_search",
 	"github",
 	"browser",
@@ -157,6 +163,21 @@ function buildContractBlock(): string {
 	}
 	if (registeredTools.has("ast_edit")) {
 		lines.push("`ast_edit` is dry-run by default: verify the preview, then re-issue with apply: true.");
+	}
+	if (registeredTools.has("bash")) {
+		lines.push(
+			"`bash` background dispatch: `async: true` returns a job id and auto-delivers the settled result; `op: jobs|output|wait|kill` manages jobs.",
+		);
+	}
+	if (registeredTools.has("task")) {
+		lines.push(
+			"`task` fans one `tasks[]` batch out to parallel subagents with blank context — each item needs complete, self-contained instructions; `isolated: true` runs it in a git worktree and applies the diff back.",
+		);
+	}
+	if (registeredTools.has("ask")) {
+		lines.push(
+			"`ask` interrupts the user: default to action on repo conventions and reasonable defaults; ask only decisions with materially different tradeoffs.",
+		);
 	}
 	if (registeredTools.has("browser")) {
 		lines.push("`browser` tabs persist across calls: `open` once, then `run` — never re-open a live tab.");

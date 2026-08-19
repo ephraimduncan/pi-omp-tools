@@ -156,9 +156,10 @@ export default function ompChrome(pi: Any): void {
 		const BaseEditor = host.CustomEditor;
 		if (!BaseEditor) return;
 
-		refreshGit(ctx.cwd ?? process.cwd());
-		if (gitTimer) clearInterval(gitTimer);
-		gitTimer = setInterval(() => refreshGit(ctx.cwd ?? process.cwd()), 5000);
+		const cwd = ctx.cwd ?? process.cwd();
+		refreshGit(cwd);
+		clearInterval(gitTimer);
+		gitTimer = setInterval(() => refreshGit(cwd), 5000);
 
 		/* omp box border colors (theme/dark.json): borderMuted / bashMode / border */
 		const BORDER_FG = "\x1b[38;2;61;66;74m"; // #3d424a

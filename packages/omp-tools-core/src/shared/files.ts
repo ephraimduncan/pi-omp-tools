@@ -4,8 +4,9 @@
  */
 import * as path from "node:path";
 import { glob } from "tinyglobby";
+import picomatch from "picomatch";
 import { ToolError } from "../host.ts";
-import { hasBinary, resolvePath, run, splitGlobEntry, statOrNull } from "./util.ts";
+import { hasBinary, resolvePath, rgIgnoreFlags, run, splitGlobEntry, statOrNull } from "./util.ts";
 
 export async function collectFiles(entries: string[], cwd: string, signal?: AbortSignal): Promise<string[]> {
 	// Glob entries anchor at their own static base dir (absolute/~ globs work);
@@ -34,11 +35,13 @@ export async function collectFiles(entries: string[], cwd: string, signal?: Abor
 	const useRg = await hasBinary("rg");
 	const scan = async (base: string, patterns: string[]): Promise<void> => {
 		if (useRg) {
-			const args = ["--files", "--hidden", "-g", "!.git"];
-			for (const pattern of patterns) args.push("-g", pattern);
+			// User globs cannot go through rg -g: override globs beat ignore
+			// rules (`*` would whitelist gitignored dirs). Filter output instead.
+			const matches = patterns.length > 0 ? picomatch(patterns, { dot: true, matchBase: true }) : null;
+			const args = ["--files", "--hidden", ...(await rgIgnoreFlags(base)), "-g", "!.git"];
 			const result = await run("rg", args, { cwd: base, signal, timeoutMs: 20_000, maxBuffer: 64 * 1024 * 1024 });
 			for (const line of result.stdout.split("\n")) {
-				if (line) found.push(path.resolve(base, line));
+				if (line && (!matches || matches(line))) found.push(path.resolve(base, line));
 			}
 		} else {
 			const matches = await glob(patterns.length > 0 ? patterns : ["**/*"], {

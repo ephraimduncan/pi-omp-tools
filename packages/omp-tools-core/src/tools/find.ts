@@ -4,6 +4,7 @@
  * directories end with `/`.
  */
 import * as path from "node:path";
+import picomatch from "picomatch";
 import { glob } from "tinyglobby";
 import { ToolError, textResult, type ToolCtx, type ToolResult } from "../host.ts";
 import {
@@ -12,6 +13,7 @@ import {
 	hasGlobMagic,
 	resolvePath,
 	run,
+	rgIgnoreFlags,
 	splitGlobEntry,
 	splitPathList,
 	statOrNull,
@@ -40,20 +42,24 @@ async function ripgrepFiles(
 	gitignore: boolean,
 	signal?: AbortSignal,
 ): Promise<string[]> {
-	// rg -g globs match the path as printed, so scan each root with cwd=root
-	// and relative output, then absolutize.
+	// User globs cannot go through rg -g: override globs beat ignore rules, so
+	// e.g. `*` would whitelist gitignored directories. rg only walks; patterns
+	// filter the relative output here. matchBase keeps rg's slash-free
+	// semantics (`*.ts` matches at any depth).
+	const matches = patterns.length > 0 ? picomatch(patterns, { dot: hidden, matchBase: true }) : null;
 	const found: string[] = [];
 	for (const root of roots) {
-		const args = ["--files", "-g", "!.git"];
+		const args = ["--files"];
 		if (hidden) args.push("--hidden");
-		if (!gitignore) args.push("--no-ignore");
-		for (const pattern of patterns) args.push("-g", pattern);
+		if (gitignore) args.push(...(await rgIgnoreFlags(root)));
+		else args.push("--no-ignore");
+		args.push("-g", "!.git");
 		const result = await run("rg", args, { cwd: root, signal, timeoutMs: 20_000, maxBuffer: 64 * 1024 * 1024 });
 		if (result.code === 2 && !result.stdout.trim()) {
 			throw new ToolError(`rg --files error: ${result.stderr.trim().split("\n")[0] ?? "unknown"}`);
 		}
 		for (const line of result.stdout.split("\n")) {
-			if (line) found.push(path.resolve(root, line));
+			if (line && (!matches || matches(line))) found.push(path.resolve(root, line));
 		}
 	}
 	return found;

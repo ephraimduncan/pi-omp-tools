@@ -18,6 +18,7 @@ import {
 	pathExists,
 	resolvePath,
 	run,
+	rgIgnoreFlags,
 	splitGlobEntry,
 	splitPathList,
 	statOrNull,
@@ -108,7 +109,7 @@ async function ripgrepSearch(
 	if (params.case === true) baseArgs.push("--case-sensitive");
 	else baseArgs.push("--smart-case");
 	if (params.gitignore === false) baseArgs.push("--no-ignore");
-	baseArgs.push("--hidden", "-g", "!.git");
+	baseArgs.push("--hidden");
 	if (params.multiline || /\\n|\n/.test(params.pattern)) baseArgs.push("--multiline", "--multiline-dotall");
 	if (params.context && params.context > 0) baseArgs.push("-C", String(Math.min(params.context, 10)));
 	baseArgs.push("--max-count", String(SINGLE_FILE_MATCHES), "--max-filesize", "16M");
@@ -126,8 +127,12 @@ async function ripgrepSearch(
 	for (const [root, rootGlobs] of byRoot) {
 		const stat = await statOrNull(root);
 		const extraArgs = rootGlobs.flatMap(glob => ["-g", glob]);
+		// !.git last: rg's last matching -g wins, so a user glob like `*`
+		// cannot resurrect the .git tree.
+		extraArgs.push("-g", "!.git");
+		if (params.gitignore !== false) extraArgs.push(...(await rgIgnoreFlags(stat?.isDirectory() ? root : cwd)));
 		if (stat?.isDirectory()) runs.push({ cwd: root, positional: ["."], base: root, extraArgs });
-		else runs.push({ cwd, positional: [root], base: "", extraArgs: [] });
+		else runs.push({ cwd, positional: [root], base: "", extraArgs });
 	}
 
 	let stdout = "";

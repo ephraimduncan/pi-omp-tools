@@ -15,13 +15,15 @@
  *
  * Trade-offs vs daemon mode: the session lives in this process (closing the
  * terminal ends it — it is still saved and resumable), no multi-client
- * attach, and daemon-hosted features (agents view, background sessions)
- * are unavailable. Plain `prime-agent` remains untouched.
+ * attach, and the daemon-hosted agents view is unavailable. Heartbeats are
+ * emulated in-process (see ./prime-omp-heartbeats.mjs); they fire while this
+ * terminal is open. Plain `prime-agent` remains untouched.
  */
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { installInProcessHeartbeats } from "./prime-omp-heartbeats.mjs";
 
 function findPrimeRoot() {
 	if (process.env.PRIME_AGENT_ROOT) return process.env.PRIME_AGENT_ROOT;
@@ -39,6 +41,16 @@ function findPrimeRoot() {
 
 const primeRoot = findPrimeRoot();
 const { main } = await import(pathToFileURL(path.join(primeRoot, "dist", "index.js")).href);
+
+// Heartbeats live in the daemon's scheduler, which in-process sessions never
+// reach; emulate them locally so /heartbeat and the rlm-heartbeat skill work.
+// Best-effort: on unexpected prime versions the stock "requires daemon mode"
+// errors remain.
+try {
+	await installInProcessHeartbeats(primeRoot);
+} catch {
+	/* heartbeats keep their daemon-only errors */
+}
 
 // omp parity: hide the model/context tray line under the editor (omp has no
 // bottom bar; the omp chrome extension puts status in the editor's top

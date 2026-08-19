@@ -87,7 +87,10 @@ prime -p "..."         # all normal flags pass through
 
 Trade-offs vs plain `prime-agent`: the session lives in your terminal process (still saved
 and resumable, but not persistent in the background), no multi-client attach, no agents
-view. Plain `prime-agent` keeps working unchanged alongside it.
+view. Heartbeats (`/heartbeat` and the agent's rlm-heartbeat skill) are emulated
+in-process with prime's own scheduler and store, so they work normally but only fire while
+the terminal is open; jobs persist in the session's artifact dir and are revived when the
+session is reopened. Plain `prime-agent` keeps working unchanged alongside it.
 
 ## The hashline edit loop
 

@@ -154,6 +154,35 @@ export async function hasBinary(name: string): Promise<boolean> {
 	return ok;
 }
 
+const gitRepoCache = new Map<string, boolean>();
+
+/** Whether `dir` is inside a git repo (walks up looking for `.git`). */
+export async function inGitRepo(dir: string): Promise<boolean> {
+	const cached = gitRepoCache.get(dir);
+	if (cached !== undefined) return cached;
+	let inside = false;
+	for (let cur = dir; ; ) {
+		if (await pathExists(path.join(cur, ".git"))) {
+			inside = true;
+			break;
+		}
+		const parent = path.dirname(cur);
+		if (parent === cur) break;
+		cur = parent;
+	}
+	gitRepoCache.set(dir, inside);
+	return inside;
+}
+
+/**
+ * rg flags so .gitignore applies even outside a git repo. Parent ignore files
+ * are skipped there: without a repo boundary rg would walk to `/` and pick up
+ * unrelated ones.
+ */
+export async function rgIgnoreFlags(root: string): Promise<string[]> {
+	return (await inGitRepo(root)) ? [] : ["--no-require-git", "--no-ignore-parent"];
+}
+
 export async function pathExists(p: string): Promise<boolean> {
 	try {
 		await fs.access(p);

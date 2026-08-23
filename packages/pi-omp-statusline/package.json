@@ -28,6 +28,7 @@
   },
   "files": [
     "index.ts",
+    "input.ts",
     "README.md",
     "LICENSE"
   ]

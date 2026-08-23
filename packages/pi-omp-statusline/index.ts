@@ -18,6 +18,7 @@ import * as os from "node:os";
 // Host-provided virtual modules (pi and prime both alias these for extensions).
 // @ts-ignore -- resolved by the host's extension loader, not at compile time
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { routeOmpEditorInput } from "./input.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: host surfaces are structurally typed
 type Any = any;
@@ -167,10 +168,17 @@ export default function ompChrome(pi: Any): void {
 		const BORDER_GAP_FG = "\x1b[38;2;23;143;185m"; // #178fb9
 
 		class OmpEditor extends BaseEditor {
+			private readonly ompKeybindings: Any;
+
 			constructor(tui: Any, theme: Any, keybindings: Any, options?: Any) {
 				// omp's input has no "> " prompt prefix (prime's CustomEditor defaults
 				// to one). Bash-mode "!"/"!!" prefixes still apply via getBashPromptInfo.
 				super(tui, theme, keybindings, { ...options, promptPrefix: "" });
+				this.ompKeybindings = keybindings;
+			}
+
+			handleInput(data: string): void {
+				routeOmpEditorInput(data, this as Any, this.ompKeybindings, input => super.handleInput(input));
 			}
 
 			render(width: number): string[] {

@@ -30,6 +30,7 @@
     "index.ts",
     "input.ts",
     "lifecycle.ts",
+    "user-message.ts",
     "README.md",
     "LICENSE"
   ]

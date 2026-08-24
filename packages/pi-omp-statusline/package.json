@@ -29,6 +29,7 @@
   "files": [
     "index.ts",
     "input.ts",
+    "lifecycle.ts",
     "README.md",
     "LICENSE"
   ]

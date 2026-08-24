@@ -19,6 +19,7 @@ import * as os from "node:os";
 // @ts-ignore -- resolved by the host's extension loader, not at compile time
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { routeOmpEditorInput } from "./input.ts";
+import { onDefaultTerminalBackground, registerOmpEditorLifecycle } from "./lifecycle.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: host surfaces are structurally typed
 type Any = any;
@@ -72,6 +73,7 @@ export default function ompChrome(pi: Any): void {
 	let enabled = true;
 	let git: GitInfo = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
+	let unregisterEditorLifecycle: (() => void) | undefined;
 
 	const refreshGit = (cwd: string, onDone?: () => void): void => {
 		execFile("git", ["status", "--porcelain=v1", "--branch"], { cwd, timeout: 3000 }, (error, stdout) => {
@@ -169,12 +171,18 @@ export default function ompChrome(pi: Any): void {
 
 		class OmpEditor extends BaseEditor {
 			private readonly ompKeybindings: Any;
-
+			private ompStopHidden = false;
 			constructor(tui: Any, theme: Any, keybindings: Any, options?: Any) {
 				// omp's input has no "> " prompt prefix (prime's CustomEditor defaults
 				// to one). Bash-mode "!"/"!!" prefixes still apply via getBashPromptInfo.
 				super(tui, theme, keybindings, { ...options, promptPrefix: "" });
 				this.ompKeybindings = keybindings;
+				unregisterEditorLifecycle?.();
+				unregisterEditorLifecycle = registerOmpEditorLifecycle(tui, this);
+			}
+
+			setOmpStopHidden(hidden: boolean): void {
+				this.ompStopHidden = hidden;
 			}
 
 			handleInput(data: string): void {
@@ -182,7 +190,8 @@ export default function ompChrome(pi: Any): void {
 			}
 
 			render(width: number): string[] {
-				if (width < 24) return super.render(width) as string[];
+				if (this.ompStopHidden) return [];
+				if (width < 24) return (super.render(width) as string[]).map(onDefaultTerminalBackground);
 				const innerContent = width - 4; // "│ " … " │"
 				// omp's editor has no background surface — the box sits on the plain
 				// terminal bg. Prime assigns a userMessageBg surface to the editor
@@ -238,7 +247,7 @@ export default function ompChrome(pi: Any): void {
 				const bottomGap = Math.max(0, width - 4 - visibleWidth(hint));
 				const bottom = border("╰─") + border(hint) + border("─".repeat(bottomGap)) + border("─╯");
 
-				return [top, ...rows, bottom];
+				return [top, ...rows, bottom].map(onDefaultTerminalBackground);
 			}
 		}
 
@@ -248,6 +257,8 @@ export default function ompChrome(pi: Any): void {
 	};
 
 	const removeChrome = (ctx: Any): void => {
+		unregisterEditorLifecycle?.();
+		unregisterEditorLifecycle = undefined;
 		ctx.ui.setEditorComponent(undefined);
 		ctx.ui.setFooter(undefined);
 		if (gitTimer) clearInterval(gitTimer);
@@ -296,6 +307,13 @@ export default function ompChrome(pi: Any): void {
 		});
 		if (timings.length > 300) timings.splice(0, timings.length - 300);
 		messageStartedAt = 0;
+	});
+
+	pi.on?.("session_shutdown", async () => {
+		unregisterEditorLifecycle?.();
+		unregisterEditorLifecycle = undefined;
+		if (gitTimer) clearInterval(gitTimer);
+		gitTimer = undefined;
 	});
 
 	pi.on?.("session_start", async (_event: Any, ctx: Any) => {

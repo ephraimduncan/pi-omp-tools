@@ -20,12 +20,62 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { textResult, ToolError, type PiApi, type ToolCtx, type ToolResult, type ToolUpdate } from "../host.ts";
+import { sessionId, textResult, ToolError, type PiApi, type ToolCtx, type ToolResult, type ToolUpdate } from "../host.ts";
 import { ensurePromptContract, registeredTools } from "../registry.ts";
 import { loadRenderSupport, taskRenderers } from "../render.ts";
+import { sanitizeTaskText } from "../task-view.ts";
+import {
+	beginTaskActivity,
+	clearTaskActivity,
+	type TaskActivityEntry,
+	type TaskWorkerActivity,
+} from "./task-activity.ts";
+import { closeTaskAgentViews, openTaskAgents } from "./task-ui.ts";
 
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.OMP_TOOLS_TASK_CONCURRENCY) || 4);
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const MAX_ACTIVITY_ENTRIES = 256;
+const MAX_ACTIVITY_ENTRY_CHARS = 12 * 1024;
+
+interface ActiveTaskAbortStore {
+	bySession: Map<string, Map<string, AbortController>>;
+}
+
+interface TaskAbortRegistration {
+	signal: AbortSignal;
+	dispose(): void;
+}
+
+const TASK_ABORT_KEY = Symbol.for("omp-tools.task-aborts.v1");
+const taskAbortGlobals = globalThis as Record<PropertyKey, unknown>;
+taskAbortGlobals[TASK_ABORT_KEY] ??= { bySession: new Map() } satisfies ActiveTaskAbortStore;
+const taskAborts = taskAbortGlobals[TASK_ABORT_KEY] as ActiveTaskAbortStore;
+
+function registerTaskAbort(sessionKey: string, batchId: string, parent?: AbortSignal): TaskAbortRegistration {
+	const controller = new AbortController();
+	const batches = taskAborts.bySession.get(sessionKey) ?? new Map<string, AbortController>();
+	batches.get(batchId)?.abort();
+	batches.set(batchId, controller);
+	taskAborts.bySession.set(sessionKey, batches);
+	const relay = () => controller.abort(parent?.reason);
+	if (parent?.aborted) relay();
+	else parent?.addEventListener("abort", relay, { once: true });
+	return {
+		signal: controller.signal,
+		dispose() {
+			parent?.removeEventListener("abort", relay);
+			if (batches.get(batchId) === controller) batches.delete(batchId);
+			if (batches.size === 0 && taskAborts.bySession.get(sessionKey) === batches) taskAborts.bySession.delete(sessionKey);
+		},
+	};
+}
+
+function abortSessionTasks(sessionKey: string): void {
+	const batches = taskAborts.bySession.get(sessionKey);
+	if (!batches) return;
+	taskAborts.bySession.delete(sessionKey);
+	for (const controller of batches.values()) controller.abort(new Error("Task session closed"));
+}
 
 export const TASK_DESCRIPTION = `Fan out subagents in parallel, optionally workspace-isolated. Pass items in a \`tasks[]\` batch; execution blocks until all items finish and returns each agent's final report.
 
@@ -251,6 +301,11 @@ interface IsolationOutcome {
 	notice?: string;
 }
 
+async function removeIsolation(iso: Isolation): Promise<void> {
+	await git(iso.repoRoot, ["worktree", "remove", "--force", iso.worktree]);
+	await fsp.rm(iso.worktree, { recursive: true, force: true }).catch(() => {});
+}
+
 async function captureAndMerge(iso: Isolation, name: string): Promise<IsolationOutcome> {
 	try {
 		await git(iso.worktree, ["add", "-A"]);
@@ -270,8 +325,7 @@ async function captureAndMerge(iso: Isolation, name: string): Promise<IsolationO
 		}
 		return { patchPath, applied: true };
 	} finally {
-		await git(iso.repoRoot, ["worktree", "remove", "--force", iso.worktree]);
-		await fsp.rm(iso.worktree, { recursive: true, force: true }).catch(() => {});
+		await removeIsolation(iso);
 	}
 }
 
@@ -301,13 +355,79 @@ export interface TaskRunResult {
 	notice?: string;
 }
 
+type SubagentActivityEvent =
+	| { kind: "assistant"; id: string; text: string; final: boolean; at: number }
+	| { kind: "tool_start"; id: string; toolCallId: string; toolName: string; summary?: string; at: number }
+	| { kind: "tool_update"; id: string; output?: string; at: number }
+	| { kind: "tool_end"; id: string; output?: string; failed: boolean; at: number };
+
+interface ChildMessage {
+	role?: string;
+	content?: unknown;
+	usage?: { input?: number; output?: number; cost?: { total?: number } };
+	model?: string;
+	stopReason?: string;
+	errorMessage?: string;
+}
+
+interface ChildJsonEvent {
+	type?: string;
+	message?: ChildMessage;
+	toolCallId?: unknown;
+	toolName?: unknown;
+	args?: unknown;
+	partialResult?: unknown;
+	result?: unknown;
+	isError?: unknown;
+}
+
+interface SubagentProcessResult {
+	exitCode: number;
+	finalText: string;
+	stderr: string;
+	usage: SpawnUsage;
+	model?: string;
+	aborted: boolean;
+	failure?: string;
+}
+
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type: string; text: string } => {
+			return !!part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string";
+		})
+		.map(part => part.text)
+		.join("\n");
+}
+
+function resultPreview(value: unknown): string | undefined {
+	if (typeof value === "string") return value.trim() || undefined;
+	if (!value || typeof value !== "object") return undefined;
+	const record = value as Record<string, unknown>;
+	if (typeof record.text === "string" && record.text.trim()) return record.text.trim();
+	const content = messageText(record.content);
+	return content.trim() || undefined;
+}
+
+function summarizeToolArgs(value: unknown): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const args = value as Record<string, unknown>;
+	for (const key of ["path", "query", "pattern", "command", "url", "op", "action", "selector"]) {
+		const candidate = args[key];
+		if (typeof candidate === "string" && candidate.trim()) return candidate.trim().split("\n")[0];
+	}
+	return undefined;
+}
+
 function runSubagent(options: {
 	prompt: string;
 	cwd: string;
 	agentDef?: AgentDefinition;
 	signal?: AbortSignal;
-	onEvent?: (kind: "turn" | "tool") => void;
-}): Promise<{ exitCode: number; finalText: string; stderr: string; usage: SpawnUsage; model?: string; aborted: boolean }> {
+	onEvent?: (event: SubagentActivityEvent) => void;
+}): Promise<SubagentProcessResult> {
 	return new Promise(resolve => {
 		const cli = resolveHostCli();
 		const args = [...cli.args, "--mode", "json", "-p", "--no-session"];
@@ -326,7 +446,14 @@ function runSubagent(options: {
 		let stderr = "";
 		let model: string | undefined;
 		let aborted = false;
+		let failure: string | undefined;
 		let buffer = "";
+		let assistantSequence = 0;
+		let assistantId: string | undefined;
+		let toolSequence = 0;
+		let settled = false;
+		let killTimer: NodeJS.Timeout | undefined;
+		let abortListener: (() => void) | undefined;
 
 		const proc = spawn(cli.command, args, {
 			cwd: options.cwd,
@@ -334,40 +461,91 @@ function runSubagent(options: {
 			env: { ...process.env, OMP_TOOLS_TASK_DEPTH: String(taskDepth() + 1) },
 		});
 
+		const cleanup = () => {
+			if (promptFile) fs.rmSync(promptFile, { force: true });
+			if (killTimer) clearTimeout(killTimer);
+			if (abortListener && options.signal) options.signal.removeEventListener("abort", abortListener);
+		};
+		const settle = (exitCode: number) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve({ exitCode, finalText, stderr, usage, model, aborted, failure });
+		};
+		const currentAssistantId = (): string => {
+			assistantId ??= `assistant:${++assistantSequence}`;
+			return assistantId;
+		};
+		const toolId = (event: ChildJsonEvent): { id: string; callId: string; name: string } => {
+			const callId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `tool:${++toolSequence}`;
+			const name = typeof event.toolName === "string" && event.toolName ? event.toolName : "tool";
+			return { id: `tool:${callId}`, callId, name };
+		};
+
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			let event: { type?: string; message?: { role?: string; content?: unknown; usage?: Record<string, unknown>; model?: string } };
+			let event: ChildJsonEvent;
 			try {
-				event = JSON.parse(line);
+				event = JSON.parse(line) as ChildJsonEvent;
 			} catch {
+				return;
+			}
+			const at = Date.now();
+			if (event.type === "message_start" && event.message?.role === "assistant") {
+				assistantId = `assistant:${++assistantSequence}`;
+				return;
+			}
+			if (event.type === "message_update" && event.message?.role === "assistant") {
+				const text = messageText(event.message.content).trim();
+				if (text) options.onEvent?.({ kind: "assistant", id: currentAssistantId(), text, final: false, at });
 				return;
 			}
 			if (event.type === "message_end" && event.message?.role === "assistant") {
 				usage.turns++;
-				options.onEvent?.("turn");
-				const messageUsage = event.message.usage as
-					| { input?: number; output?: number; cost?: { total?: number } }
-					| undefined;
+				const messageUsage = event.message.usage;
 				if (messageUsage) {
 					usage.input += messageUsage.input ?? 0;
 					usage.output += messageUsage.output ?? 0;
 					usage.cost += messageUsage.cost?.total ?? 0;
 				}
 				if (!model && event.message.model) model = event.message.model;
-				const content = event.message.content;
-				const text = Array.isArray(content)
-					? content
-							.filter((part): part is { type: string; text: string } => {
-								return !!part && typeof part === "object" && (part as { type?: string }).type === "text";
-							})
-							.map(part => part.text)
-							.join("\n")
-					: typeof content === "string"
-						? content
-						: "";
-				if (text.trim()) finalText = text.trim();
-			} else if (event.type === "tool_execution_start") {
-				options.onEvent?.("tool");
+				const text = messageText(event.message.content).trim();
+				if (text) finalText = text;
+				options.onEvent?.({ kind: "assistant", id: currentAssistantId(), text, final: true, at });
+				if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
+					failure = event.message.errorMessage?.trim() || `Agent stopped: ${event.message.stopReason}`;
+					if (event.message.stopReason === "aborted") aborted = true;
+					if (!stderr.includes(failure)) stderr += `${stderr && !stderr.endsWith("\n") ? "\n" : ""}${failure}\n`;
+				}
+				assistantId = undefined;
+				return;
+			}
+			if (event.type === "tool_execution_start") {
+				const tool = toolId(event);
+				options.onEvent?.({
+					kind: "tool_start",
+					id: tool.id,
+					toolCallId: tool.callId,
+					toolName: tool.name,
+					summary: summarizeToolArgs(event.args),
+					at,
+				});
+				return;
+			}
+			if (event.type === "tool_execution_update") {
+				const tool = toolId(event);
+				options.onEvent?.({ kind: "tool_update", id: tool.id, output: resultPreview(event.partialResult), at });
+				return;
+			}
+			if (event.type === "tool_execution_end") {
+				const tool = toolId(event);
+				options.onEvent?.({
+					kind: "tool_end",
+					id: tool.id,
+					output: resultPreview(event.result),
+					failed: event.isError === true,
+					at,
+				});
 			}
 		};
 
@@ -381,27 +559,80 @@ function runSubagent(options: {
 			stderr += data.toString();
 			if (stderr.length > PER_TASK_OUTPUT_CAP) stderr = stderr.slice(-PER_TASK_OUTPUT_CAP);
 		});
-		proc.on("close", code => {
+		proc.on("close", (code, closeSignal) => {
 			if (buffer.trim()) processLine(buffer);
-			if (promptFile) fs.rmSync(promptFile, { force: true });
-			resolve({ exitCode: code ?? 0, finalText, stderr, usage, model, aborted });
+			if (code === null) {
+				failure ??= `Agent process terminated by ${closeSignal ?? "an unknown signal"}`;
+				if (!stderr.includes(failure)) stderr += `${stderr && !stderr.endsWith("\n") ? "\n" : ""}${failure}\n`;
+				settle(128);
+				return;
+			}
+			settle(code);
 		});
 		proc.on("error", error => {
-			if (promptFile) fs.rmSync(promptFile, { force: true });
 			stderr += error.message;
-			resolve({ exitCode: 127, finalText, stderr, usage, model, aborted });
+			settle(127);
 		});
 
 		if (options.signal) {
-			const kill = () => {
+			abortListener = () => {
 				aborted = true;
 				proc.kill("SIGTERM");
-				setTimeout(() => proc.kill("SIGKILL"), 5000).unref?.();
+				killTimer = setTimeout(() => proc.kill("SIGKILL"), 5000);
+				killTimer.unref?.();
 			};
-			if (options.signal.aborted) kill();
-			else options.signal.addEventListener("abort", kill, { once: true });
+			if (options.signal.aborted) abortListener();
+			else options.signal.addEventListener("abort", abortListener, { once: true });
 		}
 	});
+}
+
+function applySubagentActivity(worker: TaskWorkerActivity, event: SubagentActivityEvent): void {
+	const existingIndex = worker.activity.findIndex(entry => entry.id === event.id);
+	if (event.kind === "assistant") {
+		const entry: TaskActivityEntry = {
+			id: event.id,
+			kind: "assistant",
+			at: event.at,
+			text: event.text.slice(-MAX_ACTIVITY_ENTRY_CHARS),
+			status: event.final ? "completed" : "streaming",
+		};
+		if (existingIndex >= 0) worker.activity[existingIndex] = entry;
+		else worker.activity.push(entry);
+		if (event.final) worker.turns++;
+	} else if (event.kind === "tool_start") {
+		const entry: TaskActivityEntry = {
+			id: event.id,
+			kind: "tool",
+			at: event.at,
+			toolCallId: event.toolCallId,
+			toolName: event.toolName,
+			status: "running",
+			summary: event.summary?.slice(0, 1024),
+		};
+		if (existingIndex >= 0) worker.activity[existingIndex] = entry;
+		else worker.activity.push(entry);
+		worker.tools++;
+	} else if (existingIndex >= 0) {
+		const existing = worker.activity[existingIndex];
+		if (existing?.kind === "tool") {
+			existing.at = event.at;
+			if (event.output) existing.output = event.output.slice(-MAX_ACTIVITY_ENTRY_CHARS);
+			if (event.kind === "tool_end") existing.status = event.failed ? "failed" : "completed";
+		}
+	}
+	while (worker.activity.length > MAX_ACTIVITY_ENTRIES) worker.activity.shift();
+	let chars = worker.activity.reduce((sum, entry) => sum + (entry.kind === "assistant" ? entry.text.length : (entry.output?.length ?? 0) + (entry.summary?.length ?? 0)), 0);
+	while (chars > PER_TASK_OUTPUT_CAP && worker.activity.length > 1) {
+		const removed = worker.activity.shift();
+		chars -= removed?.kind === "assistant" ? removed.text.length : (removed?.output?.length ?? 0) + (removed?.summary?.length ?? 0);
+	}
+}
+
+function interruptOpenActivities(worker: TaskWorkerActivity): void {
+	for (const entry of worker.activity) {
+		if (entry.kind === "tool" && entry.status === "running") entry.status = "interrupted";
+	}
 }
 
 /** Recursion guard: subagents may spawn sub-subagents only up to depth 2. */
@@ -438,6 +669,7 @@ export async function executeTask(
 	ctx?: ToolCtx,
 	signal?: AbortSignal,
 	onUpdate?: ToolUpdate,
+	activityId?: string,
 ): Promise<ToolResult> {
 	const items = params.tasks ?? [];
 	if (items.length === 0) throw new ToolError("`tasks` must contain at least one item");
@@ -450,9 +682,10 @@ export async function executeTask(
 	const agents = await discoverAgents(cwd);
 	const taken = new Set<string>(items.map(item => item.name).filter((name): name is string => !!name));
 	const batchStarted = Date.now();
+	const batchId = activityId ?? `task:${process.pid}:${batchStarted.toString(36)}:${Math.random().toString(36).slice(2, 7)}`;
+	const sessionKey = sessionId(ctx) ?? "";
 	const statuses: string[] = [];
-	/** Structured live progress for renderers: status kind + counters per agent. */
-	const progress: Array<{ name: string; agent: string; status: string; turns: number; tools: number; isolated: boolean }> = [];
+	const progress: TaskWorkerActivity[] = [];
 	const runs: Array<TaskRunResult | undefined> = Array.from({ length: items.length });
 
 	const resolved = items.map((item, index) => {
@@ -463,132 +696,214 @@ export async function executeTask(
 			if (!agentDef) {
 				const known = [...agents.keys()];
 				throw new ToolError(
-					`Unknown agent ${JSON.stringify(item.agent)}${known.length ? ` (available: ${known.join(", ")})` : " (no agent definitions found; omit \`agent\`)"}`,
+					`Unknown agent ${JSON.stringify(item.agent)}${known.length ? ` (available: ${known.join(", ")})` : " (no agent definitions found; omit `agent`)"}`,
 				);
 			}
 		}
 		statuses[index] = "queued";
 		progress[index] = {
+			id: `${batchId}:${index}`,
+			index,
 			name,
 			agent: agentDef?.name ?? "task",
 			status: "queued",
 			turns: 0,
 			tools: 0,
 			isolated: item.isolated === true,
+			activity: [],
 		};
 		return { item, index, name, agentDef };
 	});
 
-	const pushUpdate = () => {
+	const taskAbort = registerTaskAbort(sessionKey, batchId, signal);
+	const runSignal = taskAbort.signal;
+	const activity = beginTaskActivity({
+		id: batchId,
+		sessionKey,
+		startedAt: batchStarted,
+		updatedAt: batchStarted,
+		workers: progress,
+	});
+	let updateTimer: NodeJS.Timeout | undefined;
+	const emitUpdate = () => {
 		if (!onUpdate) return;
 		const rows = resolved.map(entry => `${entry.name} (${entry.agentDef?.name ?? "task"}): ${statuses[entry.index]}`);
 		onUpdate({
 			content: [{ type: "text", text: rows.join("\n") }],
-			details: { running: true, rows, agents: progress.map(agent => ({ ...agent })), elapsedMs: Date.now() - batchStarted },
-		});
-	};
-	pushUpdate();
-
-	const runOne = async (entry: (typeof resolved)[number]): Promise<void> => {
-		const started = Date.now();
-		const taskCwd = entry.item.cwd ? path.resolve(cwd, entry.item.cwd) : cwd;
-		let isolation: Isolation | undefined;
-		let isolationNotice: string | undefined;
-		statuses[entry.index] = "starting";
-		progress[entry.index]!.status = "running";
-		pushUpdate();
-
-		if (entry.item.isolated === true) {
-			const prepared = await prepareIsolation(taskCwd, entry.name);
-			if (typeof prepared === "string") isolationNotice = prepared;
-			else isolation = prepared;
-		}
-
-		const prompt = params.context?.trim()
-			? `# Context\n${params.context.trim()}\n\n# Task\n${entry.item.task!.trim()}`
-			: entry.item.task!.trim();
-
-		let turns = 0;
-		let tools = 0;
-		const spawned = await runSubagent({
-			prompt,
-			cwd: isolation?.runCwd ?? taskCwd,
-			agentDef: entry.agentDef,
-			signal,
-			onEvent: kind => {
-				if (kind === "turn") turns++;
-				else tools++;
-				statuses[entry.index] = `running · ${turns} turn${turns === 1 ? "" : "s"} · ${tools} tool${tools === 1 ? "" : "s"}`;
-				const live = progress[entry.index]!;
-				live.status = "running";
-				live.turns = turns;
-				live.tools = tools;
-				pushUpdate();
+			details: {
+				running: true,
+				batchId,
+				rows,
+				agents: progress.map(agent => ({ ...agent, activity: agent.activity.map(entry => ({ ...entry })) })),
+				elapsedMs: Date.now() - batchStarted,
 			},
 		});
-
-		let outcome: IsolationOutcome = {};
-		if (isolation) outcome = await captureAndMerge(isolation, entry.name);
-
-		const run: TaskRunResult = {
-			name: entry.name,
-			agent: entry.agentDef?.name ?? "task",
-			ok: spawned.exitCode === 0 && !spawned.aborted,
-			exitCode: spawned.exitCode,
-			aborted: spawned.aborted,
-			finalText: spawned.finalText.slice(0, PER_TASK_OUTPUT_CAP),
-			stderr: spawned.stderr,
-			usage: spawned.usage,
-			model: spawned.model,
-			wallTimeMs: Date.now() - started,
-			isolated: entry.item.isolated === true,
-			patchPath: outcome.patchPath,
-			applied: outcome.applied,
-			notice: outcome.notice ?? isolationNotice,
-		};
-		runs[entry.index] = run;
-		statuses[entry.index] = run.ok ? `completed in ${formatWall(run.wallTimeMs)}` : spawned.aborted ? "aborted" : `failed (exit ${run.exitCode})`;
-		progress[entry.index]!.status = run.ok ? `completed · ${formatWall(run.wallTimeMs)}` : spawned.aborted ? "aborted" : `failed: exit ${run.exitCode}`;
-		pushUpdate();
+	};
+	const pushUpdate = (immediate = false) => {
+		activity.update(progress);
+		if (!onUpdate) return;
+		if (immediate) {
+			if (updateTimer) clearTimeout(updateTimer);
+			updateTimer = undefined;
+			emitUpdate();
+			return;
+		}
+		if (updateTimer) return;
+		updateTimer = setTimeout(() => {
+			updateTimer = undefined;
+			emitUpdate();
+		}, 50);
+		updateTimer.unref?.();
 	};
 
-	// Bounded pool, preserving input order in the merged result.
-	const queue = [...resolved];
-	const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, queue.length) }, async () => {
-		while (queue.length > 0) {
-			if (signal?.aborted) return;
-			const entry = queue.shift();
-			if (!entry) return;
-			await runOne(entry);
-		}
-	});
-	await Promise.all(workers);
+	try {
+		pushUpdate(true);
 
-	if (signal?.aborted) throw new ToolError("Task batch aborted");
+		const runOne = async (entry: (typeof resolved)[number]): Promise<void> => {
+			const started = Date.now();
+			const taskCwd = entry.item.cwd ? path.resolve(cwd, entry.item.cwd) : cwd;
+			let isolation: Isolation | undefined;
+			let isolationNotice: string | undefined;
+			const live = progress[entry.index]!;
+			statuses[entry.index] = "starting";
+			live.status = "starting";
+			live.startedAt = started;
+			pushUpdate(true);
 
-	const sections = resolved.map(entry => {
-		const run = runs[entry.index];
-		if (!run) return `## ${entry.name} — not started`;
-		const header = `## ${run.name} (${run.agent}) — ${run.ok ? "completed" : `FAILED (exit ${run.exitCode})`} · ${taskStats(run)}`;
-		const body = run.finalText || (run.ok ? "(no final report)" : run.stderr.split("\n").slice(-10).join("\n") || "(no output)");
-		const extras: string[] = [];
-		if (run.isolated) {
-			if (run.applied) extras.push(`isolated: changes applied to parent checkout (patch: ${run.patchPath})`);
-			else if (run.notice) extras.push(`isolated: ${run.notice}`);
-		} else if (run.notice) {
-			extras.push(run.notice);
-		}
-		return [header, body, ...extras.map(extra => `[${extra}]`)].join("\n");
-	});
+			if (entry.item.isolated === true) {
+				const prepared = await prepareIsolation(taskCwd, entry.name);
+				if (typeof prepared === "string") isolationNotice = prepared;
+				else isolation = prepared;
+			}
 
-	const failed = runs.filter(run => run && !run.ok).length;
-	const summaryLine = `${runs.length} subagent${runs.length === 1 ? "" : "s"} (${hostCliLabel()}): ${runs.length - failed} completed, ${failed} failed`;
-	return textResult([summaryLine, "", ...sections].join("\n"), {
-		tasks: runs.filter((run): run is TaskRunResult => !!run),
-		failed,
-		wallTimeMs: Date.now() - batchStarted,
-		hostCli: hostCliLabel(),
-	});
+			const prompt = params.context?.trim()
+				? `# Context\n${params.context.trim()}\n\n# Task\n${entry.item.task!.trim()}`
+				: entry.item.task!.trim();
+			statuses[entry.index] = "running";
+			live.status = "running";
+			pushUpdate(true);
+
+			let spawned: SubagentProcessResult;
+			try {
+				spawned = await runSubagent({
+					prompt,
+					cwd: isolation?.runCwd ?? taskCwd,
+					agentDef: entry.agentDef,
+					signal: runSignal,
+					onEvent: event => {
+						applySubagentActivity(live, event);
+						statuses[entry.index] = `running · ${live.turns} turn${live.turns === 1 ? "" : "s"} · ${live.tools} tool${live.tools === 1 ? "" : "s"}`;
+						live.status = "running";
+						pushUpdate();
+					},
+				});
+			} catch (error) {
+				if (isolation) await removeIsolation(isolation);
+				throw error;
+			}
+			interruptOpenActivities(live);
+
+			const succeeded = spawned.exitCode === 0 && !spawned.aborted && !spawned.failure && !runSignal.aborted;
+			let outcome: IsolationOutcome = {};
+			if (isolation) {
+				if (succeeded) outcome = await captureAndMerge(isolation, entry.name);
+				else {
+					await removeIsolation(isolation);
+					outcome.notice = "unsuccessful isolated run; partial changes discarded";
+				}
+			}
+
+			const run: TaskRunResult = {
+				name: entry.name,
+				agent: entry.agentDef?.name ?? "task",
+				ok: succeeded,
+				exitCode: spawned.exitCode,
+				aborted: spawned.aborted || runSignal.aborted,
+				finalText: sanitizeTaskText(spawned.finalText).slice(0, PER_TASK_OUTPUT_CAP),
+				stderr: sanitizeTaskText(spawned.stderr),
+				usage: spawned.usage,
+				model: spawned.model,
+				wallTimeMs: Date.now() - started,
+				isolated: entry.item.isolated === true,
+				patchPath: outcome.patchPath,
+				applied: outcome.applied,
+				notice: outcome.notice ?? isolationNotice,
+			};
+			runs[entry.index] = run;
+			statuses[entry.index] = run.ok ? `completed in ${formatWall(run.wallTimeMs)}` : run.aborted ? "aborted" : `failed (exit ${run.exitCode})`;
+			live.status = run.ok ? "completed" : run.aborted ? "aborted" : "failed";
+			live.endedAt = Date.now();
+			pushUpdate(true);
+		};
+
+		const recordInternalFailure = (entry: (typeof resolved)[number], error: unknown): void => {
+			const message = error instanceof Error ? error.message : String(error);
+			const live = progress[entry.index]!;
+			interruptOpenActivities(live);
+			live.status = "failed";
+			live.endedAt = Date.now();
+			statuses[entry.index] = "failed (internal error)";
+			runs[entry.index] = {
+				name: entry.name,
+				agent: entry.agentDef?.name ?? "task",
+				ok: false,
+				exitCode: 1,
+				finalText: "",
+				stderr: message,
+				usage: { turns: live.turns, input: 0, output: 0, cost: 0 },
+				wallTimeMs: live.startedAt ? Date.now() - live.startedAt : 0,
+				isolated: entry.item.isolated === true,
+				notice: "worker failed inside the task runner",
+			};
+			pushUpdate(true);
+		};
+
+		// Bounded pool, preserving input order and draining every worker.
+		const queue = [...resolved];
+		const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, queue.length) }, async () => {
+			while (queue.length > 0) {
+				if (runSignal.aborted) return;
+				const entry = queue.shift();
+				if (!entry) return;
+				try {
+					await runOne(entry);
+				} catch (error) {
+					recordInternalFailure(entry, error);
+				}
+			}
+		});
+		await Promise.all(workers);
+
+		if (runSignal.aborted) throw new ToolError("Task batch aborted");
+
+		const sections = resolved.map(entry => {
+			const run = runs[entry.index];
+			if (!run) return `## ${entry.name} — not started`;
+			const header = `## ${run.name} (${run.agent}) — ${run.ok ? "completed" : `FAILED (exit ${run.exitCode})`} · ${taskStats(run)}`;
+			const body = run.finalText || (run.ok ? "(no final report)" : run.stderr.split("\n").slice(-10).join("\n") || "(no output)");
+			const extras: string[] = [];
+			if (run.isolated) {
+				if (run.applied) extras.push(`isolated: changes applied to parent checkout (patch: ${run.patchPath})`);
+				else if (run.notice) extras.push(`isolated: ${run.notice}`);
+			} else if (run.notice) {
+				extras.push(run.notice);
+			}
+			return [header, body, ...extras.map(extra => `[${extra}]`)].join("\n");
+		});
+
+		const failed = runs.filter(run => run && !run.ok).length;
+		const summaryLine = `${runs.length} subagent${runs.length === 1 ? "" : "s"} (${hostCliLabel()}): ${runs.length - failed} completed, ${failed} failed`;
+		return textResult([summaryLine, "", ...sections].join("\n"), {
+			tasks: runs.filter((run): run is TaskRunResult => !!run),
+			failed,
+			wallTimeMs: Date.now() - batchStarted,
+			hostCli: hostCliLabel(),
+		});
+	} finally {
+		if (updateTimer) clearTimeout(updateTimer);
+		taskAbort.dispose();
+		activity.finish();
+	}
 }
 
 /* -------------------------------- register ------------------------------- */
@@ -596,6 +911,30 @@ export async function executeTask(
 export async function registerTask(pi: PiApi): Promise<void> {
 	registeredTools.add("task");
 	ensurePromptContract(pi);
+	if (typeof pi.registerCommand === "function") {
+		pi.registerCommand("task-agents", {
+			description: "Open the live task-agent view",
+			handler: async (_args, ctx) => {
+				await openTaskAgents(ctx);
+			},
+		});
+	}
+	if (typeof pi.registerShortcut === "function") {
+		pi.registerShortcut("alt+t", {
+			description: "Open the live task-agent view",
+			handler: async ctx => {
+				await openTaskAgents(ctx);
+			},
+		});
+	}
+	if (typeof pi.on === "function") {
+		pi.on("session_shutdown", (_event: unknown, ctx?: unknown) => {
+			const key = sessionId(ctx) ?? "";
+			closeTaskAgentViews(key);
+			abortSessionTasks(key);
+			clearTaskActivity(key);
+		});
+	}
 	const support = await loadRenderSupport();
 	pi.registerTool({
 		...(support ? { renderShell: "self", ...taskRenderers(support) } : {}),
@@ -641,8 +980,8 @@ export async function registerTask(pi: PiApi): Promise<void> {
 			}
 			return args;
 		},
-		async execute(_id: string, call: TaskParams, signal?: AbortSignal, onUpdate?: ToolUpdate, callCtx?: ToolCtx) {
-			return executeTask(call, callCtx, signal, onUpdate);
+		async execute(id: string, call: TaskParams, signal?: AbortSignal, onUpdate?: ToolUpdate, callCtx?: ToolCtx) {
+			return executeTask(call, callCtx, signal, onUpdate, id);
 		},
 	});
 }

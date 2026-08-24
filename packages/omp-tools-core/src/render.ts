@@ -12,6 +12,8 @@
  */
 
 import { readGroupOf } from "./registry.ts";
+import { renderTaskWorkerCard, sanitizeTaskText, type TaskViewStyle } from "./task-view.ts";
+import type { TaskActivityEntry, TaskWorkerActivity, TaskWorkerStatus } from "./tools/task-activity.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: host theme/components are structurally typed
 type Any = any;
@@ -2304,6 +2306,7 @@ interface TaskRunDetail {
 	aborted?: boolean;
 	wallTimeMs?: number;
 	finalText?: string;
+	stderr?: string;
 	isolated?: boolean;
 	applied?: boolean;
 	patchPath?: string;
@@ -2312,12 +2315,51 @@ interface TaskRunDetail {
 }
 
 interface TaskAgentProgress {
+	id?: string;
+	index?: number;
 	name?: string;
 	agent?: string;
 	status?: string;
 	turns?: number;
 	tools?: number;
 	isolated?: boolean;
+	startedAt?: number;
+	endedAt?: number;
+	activity?: TaskActivityEntry[];
+}
+
+function taskWorkerStatus(status: string | undefined): TaskWorkerStatus {
+	if (status?.startsWith("completed")) return "completed";
+	if (status?.startsWith("failed")) return "failed";
+	if (status === "aborted") return "aborted";
+	if (status === "starting") return "starting";
+	if (status === "queued") return "queued";
+	return "running";
+}
+
+function taskWorkerOf(agent: TaskAgentProgress, index: number): TaskWorkerActivity {
+	return {
+		id: agent.id ?? `task-worker:${index}`,
+		index: agent.index ?? index,
+		name: agent.name ?? "?",
+		agent: agent.agent ?? "task",
+		status: taskWorkerStatus(agent.status),
+		turns: agent.turns ?? 0,
+		tools: agent.tools ?? 0,
+		isolated: agent.isolated === true,
+		startedAt: agent.startedAt,
+		endedAt: agent.endedAt,
+		activity: Array.isArray(agent.activity) ? agent.activity : [],
+	};
+}
+
+function taskViewStyle(R: RenderSupport, theme: Any): TaskViewStyle {
+	return {
+		fg: (color, text) => fg(theme, color, text),
+		bold: text => bold(theme, text),
+		visibleWidth: text => vw(R, text),
+		fit: (text, width) => fit(R, text, width),
+	};
 }
 
 function formatTaskTokens(count: number): string {
@@ -2374,39 +2416,35 @@ export function taskRenderers(R: RenderSupport): Renderers {
 			if (!running) markDone(context);
 			if (context?.isError) return errorBox(R, theme, "Task", "", result);
 
-			/* ---- live progress tree ---- */
+			/* ---- stacked live worker terminals ---- */
 			if (running) {
 				const agents = (Array.isArray(details?.agents) ? details.agents : []) as TaskAgentProgress[];
-				const done = agents.filter(agent => agent.status?.startsWith("completed")).length;
-				const meta: string[] = [`${agents.length} subagent${agents.length === 1 ? "" : "s"}`];
+				const workers = agents.map(taskWorkerOf);
+				const done = workers.filter(worker => worker.status === "completed").length;
+				const active = workers.filter(worker => worker.status === "running" || worker.status === "starting").length;
+				const meta: string[] = [`${workers.length} subagent${workers.length === 1 ? "" : "s"}`];
+				if (active > 0) meta.push(`${active} running`);
 				if (done > 0) meta.push(`${done} done`);
 				if (typeof details?.elapsedMs === "number") meta.push(wallLabel(details.elapsedMs));
 				const header = statusLine(theme, {
 					icon: statusIcon(theme, "running"),
-					title: "Task",
+					title: "Task agents",
 					description: fg(theme, "muted", meta.join(" · ")),
 				});
-				const rows = agents.map((agent, index) => {
-					const last = index === agents.length - 1;
-					const prefix = fg(theme, "dim", last ? TREE.last : TREE.branch);
-					const name = agent.name ?? "?";
-					const iso = agent.isolated === true ? fg(theme, "dim", " [isolated]") : "";
-					const status = agent.status ?? "queued";
-					if (status.startsWith("completed")) {
-						return `${prefix}${fg(theme, "text", "●")} ${fg(theme, "text", name)}${taskAgentBadge(theme, agent.agent)} ${fg(theme, "muted", status)}${iso}`;
-					}
-					if (status.startsWith("failed") || status === "aborted") {
-						return `${prefix}${fg(theme, "error", "✘")} ${fg(theme, "text", name)}${taskAgentBadge(theme, agent.agent)} ${chipBadge(theme, status, "error")}${iso}`;
-					}
-					if (status === "queued") {
-						return `${prefix}${fg(theme, "dim", "◌")} ${fg(theme, "muted", `${name} queued`)}${iso}`;
-					}
-					const stats: string[] = [];
-					if (agent.turns) stats.push(`${agent.turns} turn${agent.turns === 1 ? "" : "s"}`);
-					if (agent.tools) stats.push(`${agent.tools} tool${agent.tools === 1 ? "" : "s"}`);
-					return `${prefix}${fg(theme, "accent", "●")} ${fg(theme, "accent", name)}${taskAgentBadge(theme, agent.agent)} ${fg(theme, "muted", `running${stats.length ? ` · ${stats.join(" · ")}` : ""}`)}${iso}`;
-				});
-				return lineText(R, [header, ...rows]);
+				const style = taskViewStyle(R, theme);
+				return {
+					render(width: number): string[] {
+						const w = Math.max(MIN_BOX_WIDTH, width || FALLBACK_WIDTH);
+						const lines = ["", fit(R, header, w), ""];
+						for (const [index, worker] of workers.entries()) {
+							const bodyLines = worker.status === "running" || worker.status === "starting" ? 8 : worker.status === "queued" ? 1 : 3;
+							lines.push(...renderTaskWorkerCard(style, worker, w, { bodyLines }).lines);
+							if (index < workers.length - 1) lines.push("");
+						}
+						return lines;
+					},
+					invalidate(): void {},
+				};
 			}
 
 			/* ---- final result box ---- */
@@ -2433,7 +2471,8 @@ export function taskRenderers(R: RenderSupport): Renderers {
 					chips.push(run.applied === true ? chipBadge(theme, "isolated: applied", "success") : chipBadge(theme, "isolated", "accent"));
 				}
 				const label = `${okDot} ${bold(theme, run.name ?? "?")}${taskAgentBadge(theme, run.agent)}${chips.length > 0 ? ` ${chips.join(" ")}` : ""} ${taskAgentStats(theme, run)}`;
-				const bodyRows = (run.finalText ?? "")
+				const body = sanitizeTaskText(run.finalText?.trim() || (run.ok ? "" : run.stderr?.trim() ?? ""));
+				const bodyRows = (body || (run.ok ? "(no final report)" : "(no output)"))
 					.split("\n")
 					.map(line => (run.ok ? fg(theme, "toolOutput", line) : fg(theme, "error", line)));
 				const { shown, hidden } = bodyWindow(bodyRows, expanded, COLLAPSED_CODE_LINES);

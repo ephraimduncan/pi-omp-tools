@@ -486,6 +486,71 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 	assert.match(readOut, /╰─+╯/);
 });
 
+test("renderers: live task progress uses aligned stacked worker terminals", async () => {
+	const { taskRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	class FakeText {
+		text: string;
+		constructor(text: string) {
+			this.text = text;
+		}
+	}
+	const R = { Text: FakeText as never, Container: FakeText as never } as never;
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	const component = taskRenderers(R).renderResult(
+		{
+			content: [{ type: "text", text: "running" }],
+			details: {
+				running: true,
+				elapsedMs: 4_000,
+				agents: [
+					{
+						id: "batch:0",
+						index: 0,
+						name: "StreamWorker",
+						agent: "task",
+						status: "running",
+						turns: 2,
+						tools: 3,
+						activity: [
+							{ id: "assistant:1", kind: "assistant", at: Date.UTC(2026, 0, 1, 12), text: "Inspecting the renderer.", status: "streaming" },
+							{ id: "tool:1", kind: "tool", at: Date.UTC(2026, 0, 1, 12, 0, 1), toolCallId: "1", toolName: "read", status: "running", summary: "src/render.ts" },
+						],
+					},
+					{ id: "batch:1", index: 1, name: "DoneWorker", agent: "task", status: "completed", turns: 1, tools: 1, activity: [] },
+				],
+			},
+		},
+		{ expanded: false },
+		theme,
+		{ state: {} },
+	) as { render: (width: number) => string[] };
+	const lines = component.render(80);
+	const output = lines.join("\n");
+	assert.match(output, /Task agents: 2 subagents · 1 running · 1 done/);
+	assert.match(output, /StreamWorker · running/);
+	assert.match(output, /Inspecting the renderer\./);
+	assert.match(output, /▣ Read: src\/render\.ts/);
+	assert.match(output, /✔ DoneWorker · completed/);
+	const borders = lines.filter(line => line.startsWith("╭") || line.startsWith("╰"));
+	assert.equal(borders.length, 4);
+	for (const border of borders) assert.equal(border.length, 80);
+	const failed = taskRenderers(R).renderResult(
+		{
+			content: [{ type: "text", text: "unused" }],
+			details: {
+				tasks: [{ name: "FailedWorker", agent: "task", ok: false, exitCode: 1, finalText: "", stderr: "provider error\x1b[2Jdetails", usage: {} }],
+				failed: 1,
+			},
+		},
+		{ expanded: false },
+		theme,
+		{ state: {} },
+	) as { render: (width: number) => string[] };
+	const failedOutput = failed.render(80).join("\n");
+	assert.match(failedOutput, /provider errordetails/);
+	assert.equal(failedOutput.includes("\x1b"), false);
+});
+
 test("renderers: todo box, web_search sections, github inline line", async () => {
 	const { todoRenderers, webSearchRenderers, githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
 	class FakeText {

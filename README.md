@@ -14,6 +14,7 @@ Lean reimplementations of omp's tool suite, without the omp runtime:
 | [pi-ast-grep](packages/pi-ast-grep) | `ast_grep` | Structural code queries via tree-sitter (ast-grep patterns) |
 | [pi-ast-edit](packages/pi-ast-edit) | `ast_edit` | Structural rewrites, previewed before apply |
 | [pi-todo](packages/pi-todo) | `todo` | Phased session task list. You refer to tasks by verbatim content. The earliest open task auto-promotes. |
+| [pi-task](packages/pi-task) | `task` | Fan out bounded child agents with stacked live output cards and an interactive task-agent view |
 | [pi-web-search](packages/pi-web-search) | `web_search` | One web query through Exa or Parallel. The result contains an answer and citations. |
 | [pi-github](packages/pi-github) | `github` | GitHub operations through the logged-in `gh` CLI: repositories, files, pull request create/checkout/push, issue and PR views, search, and Actions run-watch |
 | [pi-browser](packages/pi-browser) | `browser` | Persistent tabs use raw CDP. If Obscura is installed, the tool uses Obscura. If not, the tool uses a Chromium browser. The tool does not use Puppeteer. |
@@ -86,11 +87,19 @@ prime -p "..."         # all normal flags pass through
 ```
 
 Trade-offs vs plain `prime-agent`: the session lives in your terminal process (still saved
-and resumable, but not persistent in the background), no multi-client attach, no agents
-view. Heartbeats (`/heartbeat` and the agent's rlm-heartbeat skill) are emulated
+and resumable, but not persistent in the background), with no multi-client attach or
+daemon-wide agents view. Heartbeats (`/heartbeat` and the agent's rlm-heartbeat skill) are emulated
 in-process with prime's own scheduler and store, so they work normally but only fire while
 the terminal is open; jobs persist in the session's artifact dir and are revived when the
 session is reopened. Plain `prime-agent` keeps working unchanged alongside it.
+
+## Live task-agent view
+
+While a `task` batch is running, press `Alt+T` or run `/task-agents` to open every worker in a stacked terminal view. Click a worker to select it, then click it again to focus its longer stream. `↑`/`↓` and Enter provide the same keyboard path; Escape returns to all workers and then closes the view.
+
+Mouse-wheel input stays inside the view: wheel over a card to browse that worker's history, or wheel anywhere in the focused view. Scrolling up pauses live-follow; returning to the bottom resumes it. The host transcript does not move.
+
+The interactive view requires a local TUI extension host. It works in pi and with the in-process `prime-omp` launcher above; daemon/RPC and print/JSON modes keep the non-interactive task result.
 
 ## The hashline edit loop
 

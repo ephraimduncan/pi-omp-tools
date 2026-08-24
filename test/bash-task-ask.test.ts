@@ -17,6 +17,7 @@ import {
 	registerBash,
 	registerTask,
 	resolveHostCli,
+	taskActivitySource,
 	ToolError,
 	type AskUi,
 	type ToolCtx,
@@ -232,6 +233,96 @@ process.exit(${options.failing ? 2 : 0});
 	fs.writeFileSync(script, body);
 	return script;
 }
+function writeStreamingFakeAgent(dir: string): string {
+	const script = path.join(dir, "streaming-agent.mjs");
+	const body = `
+const draft = { role: "assistant", content: [{ type: "text", text: "Inspecting the renderer now." }] };
+console.log(JSON.stringify({ type: "message_update", message: draft }));
+console.log(JSON.stringify({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: { path: "src/render.ts" } }));
+console.log(JSON.stringify({ type: "tool_execution_update", toolCallId: "tool-1", toolName: "read", partialResult: { content: [{ type: "text", text: "renderer preview" }] } }));
+setTimeout(() => {
+	console.log(JSON.stringify({ type: "tool_execution_end", toolCallId: "tool-1", toolName: "read", result: { content: [{ type: "text", text: "renderer complete" }] }, isError: false }));
+	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "fake-stream", usage: { input: 20, output: 8, cost: { total: 0.0002 } }, content: [{ type: "text", text: "Streaming report complete." }] } }));
+}, 100);
+`;
+	fs.writeFileSync(script, body);
+	return script;
+}
+
+function writeProviderErrorAgent(dir: string): string {
+	const script = path.join(dir, "provider-error-agent.mjs");
+	fs.writeFileSync(
+		script,
+		`console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "provider credentials rejected", content: [] } }));\n`,
+	);
+	return script;
+}
+
+function writeAbortAgent(dir: string): string {
+	const script = path.join(dir, "abort-agent.mjs");
+	fs.writeFileSync(
+		script,
+		`import * as fs from "node:fs";\nfs.writeFileSync("partial.txt", "partial change\\n");\nconsole.log(JSON.stringify({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "partial change written" }] } }));\nsetInterval(() => {}, 1000);\n`,
+	);
+	return script;
+}
+
+test("task: streams bounded assistant and tool activity while the batch runs", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-stream-"));
+	const script = writeStreamingFakeAgent(dir);
+	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	const observedStatuses: string[] = [];
+	const unsubscribeActivity = taskActivitySource.subscribe("task-stream-session", () => {
+		const status = taskActivitySource.snapshot("task-stream-session")[0]?.workers[0]?.status;
+		if (status) observedStatuses.push(status);
+	});
+	try {
+		let resolveActivity: (() => void) | undefined;
+		const activitySeen = new Promise<void>(resolve => {
+			resolveActivity = resolve;
+		});
+		const run = executeTask(
+			{ tasks: [{ name: "StreamWorker", task: "# Target\nStream a complete worker report." }] },
+			sessionCtx("task-stream-session", dir),
+			undefined,
+			update => {
+				const agents = update.details?.agents as Array<{ activity?: unknown[] }> | undefined;
+				if ((agents?.[0]?.activity?.length ?? 0) >= 2) resolveActivity?.();
+			},
+			"task-stream-call",
+		);
+		await activitySeen;
+		const active = taskActivitySource.snapshot("task-stream-session");
+		assert.equal(active.length, 1);
+		const worker = active[0]?.workers[0];
+		assert.equal(worker?.id, "task-stream-call:0");
+		assert.ok(worker?.activity.some(entry => entry.kind === "assistant" && /Inspecting the renderer/.test(entry.text)));
+		assert.ok(worker?.activity.some(entry => entry.kind === "tool" && entry.toolName === "read" && entry.output === "renderer preview"));
+
+		const result = await run;
+		assert.match(text(result), /Streaming report complete/);
+		assert.ok(observedStatuses.includes("completed"), "subscribers see final status before active cleanup");
+		assert.equal(taskActivitySource.snapshot("task-stream-session").length, 0, "completed batches must leave active state");
+	} finally {
+		unsubscribeActivity();
+		delete process.env.OMP_TOOLS_TASK_CLI;
+	}
+});
+
+test("task: provider error messages fail even when JSON mode exits zero", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-provider-error-"));
+	const script = writeProviderErrorAgent(dir);
+	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	try {
+		const result = await executeTask({ tasks: [{ name: "ErrorWorker", task: "# Target\nSurface the provider error." }] }, { cwd: dir });
+		assert.match(text(result), /0 completed, 1 failed/);
+		assert.match(text(result), /provider credentials rejected/);
+		const run = (result.details?.tasks as Array<{ ok: boolean }> | undefined)?.[0];
+		assert.equal(run?.ok, false);
+	} finally {
+		delete process.env.OMP_TOOLS_TASK_CLI;
+	}
+});
 
 test("task: batch fans out and merges per-task reports", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-run-"));
@@ -292,6 +383,34 @@ test("task: isolated item runs in a worktree and applies the patch back", async 
 		assert.equal(fs.readFileSync(path.join(repo, "agent-output.txt"), "utf8"), "written by fake agent\n");
 		const worktrees = execFileSync("git", ["worktree", "list"], { cwd: repo }).toString();
 		assert.equal(worktrees.trim().split("\n").length, 1, "isolation worktree must be removed");
+	} finally {
+		delete process.env.OMP_TOOLS_TASK_CLI;
+	}
+});
+
+test("task: aborting an isolated worker discards its partial patch", async () => {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-iso-abort-"));
+	execFileSync("git", ["init", "-q"], { cwd: repo });
+	execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
+	const script = writeAbortAgent(repo);
+	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	const controller = new AbortController();
+	try {
+		await assert.rejects(
+			executeTask(
+				{ tasks: [{ name: "AbortWorker", task: "# Target\nWrite a partial change, then wait.", isolated: true }] },
+				{ cwd: repo },
+				controller.signal,
+				update => {
+					const activity = (update.details?.agents as Array<{ activity?: unknown[] }> | undefined)?.[0]?.activity;
+					if ((activity?.length ?? 0) > 0) controller.abort();
+				},
+			),
+			/Task batch aborted/,
+		);
+		assert.equal(fs.existsSync(path.join(repo, "partial.txt")), false, "partial isolated changes must not reach the parent checkout");
+		const worktrees = execFileSync("git", ["worktree", "list"], { cwd: repo }).toString();
+		assert.equal(worktrees.trim().split("\n").length, 1, "aborted isolation worktree must be removed");
 	} finally {
 		delete process.env.OMP_TOOLS_TASK_CLI;
 	}

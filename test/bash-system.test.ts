@@ -1,14 +1,14 @@
 /**
- * System-shell fallback suite: forces OMP_TOOLS_BASH_NO_BRUSH before the tool
- * module loads, so the bash tool exercises the spawn/`script` path that hosts
- * without @oh-my-pi/pi-natives use. Runs in its own process (node --test
+ * System-shell fallback suite: forces LAZY_PRIME_BASH_NO_BRUSH before the tool
+ * module loads, so the bash tool exercises the spawn/`script` path when the
+ * optional native dependency is unavailable. Runs in its own process (`node --test`
  * spawns one per file), so the natives cache in the sibling suite is unaffected.
  */
-process.env.OMP_TOOLS_BASH_NO_BRUSH = "1";
+process.env.LAZY_PRIME_BASH_NO_BRUSH = "1";
 
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { executeBash, loadBrushNatives, type ToolResult } from "../packages/omp-tools-core/index.ts";
+import { executeBash, loadBrushNatives, type ToolResult } from "../packages/lazy-prime-core/index.ts";
 
 function text(result: ToolResult): string {
 	return result.content

@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
-import { executeTodo, ToolError, type ToolResult } from "../packages/omp-tools-core/index.ts";
+import { executeTodo, ToolError, type ToolResult } from "../packages/lazy-prime-core/index.ts";
 
 interface TodoTask {
 	content: string;
@@ -161,7 +165,7 @@ test("todo: state is scoped and persisted per session id", { concurrency: false 
 	// Simulate a process restart for session A: drop its in-memory state, keep the snapshot file.
 	const globals = globalThis as Record<PropertyKey, unknown>;
 	// Shape owned by todo.ts: session id -> state.
-	const states = globals[Symbol.for("omp-tools.todo.v2")] as Map<string, unknown>;
+	const states = globals[Symbol.for("lazy-prime.todo.v2")] as Map<string, unknown>;
 	states.delete(ids.a);
 	const recovered = await executeTodo({ op: "view" }, session(ids.a));
 	assert.equal(details(recovered).phases[0]?.tasks[0]?.content, "Session A task");
@@ -169,4 +173,25 @@ test("todo: state is scoped and persisted per session id", { concurrency: false 
 	// A ctx without a session manager never touches session state.
 	const fallback = await executeTodo({ op: "view" }, { cwd: process.cwd() });
 	assert.ok(!details(fallback).phases.some(phase => phase.tasks.some(t => t.content === "Session A task")));
+});
+
+test("todo: legacy snapshot names migrate into Lazy Prime state", { concurrency: false }, async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "lazy-prime-todo-migrate-"));
+	const id = `todo-migrate-${process.pid}-${Date.now()}`;
+	const hash = createHash("sha256").update(id).digest("hex").slice(0, 16);
+	const previousScratch = process.env.PI_SCRATCH_DIR;
+	process.env.PI_SCRATCH_DIR = dir;
+	try {
+		await fs.writeFile(path.join(dir, `legacy-todo-${hash}.json`), JSON.stringify({
+			phases: [{ name: "Migrated", tasks: [{ content: "Recover the prior todo snapshot", status: "in_progress" }] }],
+		}), "utf8");
+		const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => id } };
+		const recovered = await executeTodo({ op: "view" }, ctx);
+		assert.equal(details(recovered).phases[0]?.tasks[0]?.content, "Recover the prior todo snapshot");
+		assert.match(await fs.readFile(path.join(dir, `lazy-prime-todo-${hash}.json`), "utf8"), /Recover the prior todo snapshot/);
+	} finally {
+		if (previousScratch === undefined) delete process.env.PI_SCRATCH_DIR;
+		else process.env.PI_SCRATCH_DIR = previousScratch;
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 });

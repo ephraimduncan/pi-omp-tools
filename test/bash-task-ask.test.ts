@@ -21,7 +21,7 @@ import {
 	type AskUi,
 	type ToolCtx,
 	type ToolResult,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 
 /** Fake host ctx with a stable session id (keys the persistent brush session). */
 function sessionCtx(id: string, cwd?: string): ToolCtx {
@@ -51,8 +51,8 @@ test("bash: non-zero exit is a result, not a thrown error", async () => {
 });
 
 test("bash: cwd and env params apply", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-bash-test-"));
-	const result = await executeBash({ command: "pwd; echo $OMP_TOOLS_TEST_VALUE", cwd: dir, env: { OMP_TOOLS_TEST_VALUE: "marker-42" } });
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-bash-test-"));
+	const result = await executeBash({ command: "pwd; echo $LAZY_PRIME_TEST_VALUE", cwd: dir, env: { LAZY_PRIME_TEST_VALUE: "marker-42" } });
 	const lines = text(result).split("\n");
 	assert.equal(fs.realpathSync(lines[0]!), fs.realpathSync(dir));
 	assert.equal(lines[1], "marker-42");
@@ -66,7 +66,7 @@ test("bash: timeout kills the command and marks timedOut", async () => {
 	assert.match(text(result), /timed out after 1 seconds/);
 });
 
-test("bash: clamp helper mirrors omp's rules", () => {
+test("bash: clamp helper mirrors Lazy Prime's rules", () => {
 	assert.equal(clampBashTimeout(undefined), 300);
 	assert.equal(clampBashTimeout(0), undefined);
 	assert.equal(clampBashTimeout(999_999), 3600);
@@ -102,7 +102,7 @@ test("bash: op kill stops a running job", async () => {
 });
 
 test("bash: auto-background converts a slow foreground command", async () => {
-	process.env.OMP_TOOLS_BASH_AUTOBG_MS = "300";
+	process.env.LAZY_PRIME_BASH_AUTOBG_MS = "300";
 	try {
 		let delivered: string | undefined;
 		const deliveredPromise = new Promise<void>(resolve => {
@@ -119,7 +119,7 @@ test("bash: auto-background converts a slow foreground command", async () => {
 		assert.match(delivered!, /late-output/);
 		assert.match(delivered!, /<background-job id="b\d+" status="completed"/);
 	} finally {
-		delete process.env.OMP_TOOLS_BASH_AUTOBG_MS;
+		delete process.env.LAZY_PRIME_BASH_AUTOBG_MS;
 	}
 });
 
@@ -137,7 +137,7 @@ test("bash: large output is truncated inline with a log file", async () => {
 
 const brushAvailable = await loadBrushNatives().then(natives => natives !== null);
 
-test("bash: brush backend is active when @oh-my-pi/pi-natives is installed", { skip: !brushAvailable }, async () => {
+test("bash: brush backend is active when the optional native dependency is installed", { skip: !brushAvailable }, async () => {
 	const result = await executeBash({ command: "echo brush-check" }, sessionCtx("brush-backend-test"));
 	assert.equal(result.details?.backend, "brush");
 	assert.equal(text(result), "brush-check");
@@ -145,14 +145,14 @@ test("bash: brush backend is active when @oh-my-pi/pi-natives is installed", { s
 
 test("bash: brush session persists exports and cd across calls", { skip: !brushAvailable }, async () => {
 	const ctx = sessionCtx("brush-persist-test");
-	await executeBash({ command: "export OMP_BRUSH_MARK=persist-7; cd /tmp" }, ctx);
-	const result = await executeBash({ command: "echo $OMP_BRUSH_MARK in $(pwd)" }, ctx);
+	await executeBash({ command: "export LAZY_PRIME_BRUSH_MARK=persist-7; cd /tmp" }, ctx);
+	const result = await executeBash({ command: "echo $LAZY_PRIME_BRUSH_MARK in $(pwd)" }, ctx);
 	assert.match(text(result), /persist-7 in .*tmp/);
 });
 
 test("bash: brush sessions are isolated per host session", { skip: !brushAvailable }, async () => {
-	await executeBash({ command: "export OMP_BRUSH_ISO=leak-check" }, sessionCtx("brush-iso-a"));
-	const result = await executeBash({ command: "echo [$OMP_BRUSH_ISO]" }, sessionCtx("brush-iso-b"));
+	await executeBash({ command: "export LAZY_PRIME_BRUSH_ISO=leak-check" }, sessionCtx("brush-iso-a"));
+	const result = await executeBash({ command: "echo [$LAZY_PRIME_BRUSH_ISO]" }, sessionCtx("brush-iso-b"));
 	assert.equal(text(result), "[]");
 });
 
@@ -193,7 +193,7 @@ test("task: agent frontmatter parses name/model/tools and prompt body", () => {
 });
 
 test("task: discoverAgents reads project agent dirs", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-agents-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-task-agents-"));
 	fs.mkdirSync(path.join(dir, ".pi", "agents"), { recursive: true });
 	fs.writeFileSync(path.join(dir, ".pi", "agents", "reviewer.md"), "---\ndescription: reviews diffs\n---\nReview carefully.");
 	const agents = await discoverAgents(dir);
@@ -202,14 +202,14 @@ test("task: discoverAgents reads project agent dirs", async () => {
 	assert.equal(reviewer?.description, "reviews diffs");
 });
 
-test("task: resolveHostCli honors OMP_TOOLS_TASK_CLI", () => {
-	process.env.OMP_TOOLS_TASK_CLI = "node /tmp/fake-agent.js";
+test("task: resolveHostCli honors LAZY_PRIME_TASK_CLI", () => {
+	process.env.LAZY_PRIME_TASK_CLI = "node /tmp/fake-agent.js";
 	try {
 		const cli = resolveHostCli();
 		assert.equal(cli.command, "node");
 		assert.deepEqual(cli.args, ["/tmp/fake-agent.js"]);
 	} finally {
-		delete process.env.OMP_TOOLS_TASK_CLI;
+		delete process.env.LAZY_PRIME_TASK_CLI;
 	}
 });
 
@@ -234,9 +234,9 @@ process.exit(${options.failing ? 2 : 0});
 }
 
 test("task: batch fans out and merges per-task reports", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-run-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-task-run-"));
 	const script = writeFakeAgent(dir);
-	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	process.env.LAZY_PRIME_TASK_CLI = `node ${script}`;
 	try {
 		const result = await executeTask(
 			{
@@ -258,29 +258,29 @@ test("task: batch fans out and merges per-task reports", async () => {
 		assert.equal(tasks[0]?.usage.input, 100);
 		assert.equal(tasks[0]?.model, "fake-1");
 	} finally {
-		delete process.env.OMP_TOOLS_TASK_CLI;
+		delete process.env.LAZY_PRIME_TASK_CLI;
 	}
 });
 
 test("task: failing subagent is reported, not thrown", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-fail-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-task-fail-"));
 	const script = writeFakeAgent(dir, { failing: true });
-	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	process.env.LAZY_PRIME_TASK_CLI = `node ${script}`;
 	try {
 		const result = await executeTask({ tasks: [{ task: "# Target\nFail on purpose with a full brief." }] }, { cwd: dir });
 		assert.match(text(result), /1 subagent \([\w.-]+\): 0 completed, 1 failed/);
 		assert.match(text(result), /FAILED \(exit 2\)/);
 	} finally {
-		delete process.env.OMP_TOOLS_TASK_CLI;
+		delete process.env.LAZY_PRIME_TASK_CLI;
 	}
 });
 
 test("task: isolated item runs in a worktree and applies the patch back", async () => {
-	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-iso-"));
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-task-iso-"));
 	execFileSync("git", ["init", "-q"], { cwd: repo });
 	execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
 	const script = writeFakeAgent(repo, { writeFile: "agent-output.txt" });
-	process.env.OMP_TOOLS_TASK_CLI = `node ${script}`;
+	process.env.LAZY_PRIME_TASK_CLI = `node ${script}`;
 	try {
 		const result = await executeTask(
 			{ tasks: [{ name: "IsoWorker", task: "# Target\nWrite agent-output.txt with a full brief.", isolated: true }] },
@@ -293,13 +293,13 @@ test("task: isolated item runs in a worktree and applies the patch back", async 
 		const worktrees = execFileSync("git", ["worktree", "list"], { cwd: repo }).toString();
 		assert.equal(worktrees.trim().split("\n").length, 1, "isolation worktree must be removed");
 	} finally {
-		delete process.env.OMP_TOOLS_TASK_CLI;
+		delete process.env.LAZY_PRIME_TASK_CLI;
 	}
 });
 
 test("task: empty batch and unknown agent fail fast", async () => {
 	await assert.rejects(() => executeTask({ tasks: [] }), ToolError);
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-omp-task-agents-none-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lazy-prime-task-agents-none-"));
 	await assert.rejects(
 		() => executeTask({ tasks: [{ task: "# Target\nWork.", agent: "no-such-agent" }] }, { cwd: dir }),
 		/Unknown agent "no-such-agent"/,

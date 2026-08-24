@@ -6,4 +6,4 @@
 - **Dry-run by default**: matches render as unified diffs; re-issue with `"apply": true` to write
 - Same language coverage as [pi-ast-grep](../pi-ast-grep)
 
-Part of [pi-omp-tools](../../README.md). MIT.
+Part of [Lazy Prime](../../README.md). MIT.

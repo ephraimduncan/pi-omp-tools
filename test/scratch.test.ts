@@ -26,12 +26,12 @@ function makeFakePi(): {
 	};
 }
 
-const SESSION_ID = `omp-tools-scratch-test-${process.pid}`;
+const SESSION_ID = `lazy-prime-scratch-test-${process.pid}`;
 const ctx = (notifications?: string[]) => ({
 	sessionManager: { getSessionId: () => SESSION_ID },
 	ui: { notify: (message: string) => notifications?.push(message) },
 });
-const expectedDir = path.join(scratchRoot(), "pi-scratch", SESSION_ID);
+const expectedDir = path.join(scratchRoot(), "lazy-prime-scratch", SESSION_ID);
 
 test("scratch: session_start creates the dir and exports PI_SCRATCH_DIR", async () => {
 	await fs.rm(expectedDir, { recursive: true, force: true });
@@ -41,6 +41,24 @@ test("scratch: session_start creates the dir and exports PI_SCRATCH_DIR", async 
 	const stat = await fs.stat(expectedDir);
 	assert.ok(stat.isDirectory());
 	assert.equal(process.env.PI_SCRATCH_DIR, expectedDir);
+});
+
+test("scratch: session startup migrates files from the prior scratch root", async () => {
+	const legacyRoot = path.join(scratchRoot(), "legacy-scratch", SESSION_ID);
+	const legacyFile = path.join(legacyRoot, "resume.json");
+	await fs.rm(expectedDir, { recursive: true, force: true });
+	await fs.rm(legacyRoot, { recursive: true, force: true });
+	await fs.mkdir(legacyRoot, { recursive: true });
+	await fs.writeFile(legacyFile, "resume", "utf8");
+	try {
+		const { pi, handlers } = makeFakePi();
+		tmpScratch(pi as never);
+		for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx());
+		assert.equal(await fs.readFile(path.join(expectedDir, "resume.json"), "utf8"), "resume");
+	} finally {
+		await fs.rm(expectedDir, { recursive: true, force: true });
+		await fs.rm(path.dirname(legacyRoot), { recursive: true, force: true });
+	}
 });
 
 test("scratch: before_agent_start appends the prompt block once", async () => {
@@ -90,7 +108,7 @@ test("scratch: falls back to pid slug without a session manager", async () => {
 	tmpScratch(pi as never);
 	const handler = (handlers.get("before_agent_start") ?? [])[0];
 	const outcome = (await handler?.({ systemPrompt: "P" }, {})) as { systemPrompt: string };
-	const pidDir = path.join(scratchRoot(), "pi-scratch", `pid-${process.pid}`);
+	const pidDir = path.join(scratchRoot(), "lazy-prime-scratch", `pid-${process.pid}`);
 	assert.ok(outcome.systemPrompt.includes(pidDir));
 	await fs.rm(pidDir, { recursive: true, force: true });
 });

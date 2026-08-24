@@ -4,9 +4,9 @@
 
 Install [GitHub CLI](https://cli.github.com/). Then authenticate the GitHub CLI session.
 
-This package is part of [pi-omp-tools](../../README.md). MIT.
+This package is part of [Lazy Prime](../../README.md). MIT.
 
 | Claim | Evidence |
 | --- | --- |
 | The package registers the `github` tool. | `packages/pi-github/index.ts:1-5` |
-| The tool uses the `gh` executable. | `packages/omp-tools-core/src/tools/github.ts:377-384` |
+| The tool uses the `gh` executable. | `packages/lazy-prime-core/src/tools/github.ts:377-384` |

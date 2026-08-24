@@ -1,0 +1,37 @@
+{
+  "name": "@ephraimduncan/lazy-prime-gates",
+  "version": "0.1.0",
+  "description": "Lazy Prime policy gates for pi and Prime Agent",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": [
+    "lazy-prime",
+    "pi-package",
+    "pi-extension",
+    "prime-agent",
+    "policy-gates"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/lazy-prime.git",
+    "directory": "packages/lazy-prime-gates"
+  },
+  "homepage": "https://github.com/ephraimduncan/lazy-prime/tree/main/packages/lazy-prime-gates#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "guides",
+    "README.md",
+    "LICENSE"
+  ]
+}

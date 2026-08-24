@@ -1,6 +1,6 @@
 # pi-hashline-edit
 
-Hashline `edit` tool for [pi](https://pi.dev) / prime-agent — a lean reimplementation of [oh-my-pi](https://github.com/can1357/oh-my-pi)'s line-anchored patch language.
+Hashline `edit` tool for [pi](https://pi.dev) / prime-agent — Lazy Prime's line-anchored patch language.
 
 - `[path#TAG]` sections anchored on 4-hex content hashes minted by `read`/`search`
 - `PUT A.=B:` replace · `PUT <A:`/`PUT >A:` insert · `PUT A*:` block replace (tree-sitter/markdown/indent resolution) · `CUT`/paste registers that persist across calls · `REM`/`MV`
@@ -9,4 +9,4 @@ Hashline `edit` tool for [pi](https://pi.dev) / prime-agent — a lean reimpleme
 
 Overrides the built-in `edit`. Pair with [pi-read](../pi-read) and [pi-search](../pi-search) for anchors.
 
-Part of [pi-omp-tools](../../README.md). MIT.
+Part of [Lazy Prime](../../README.md). MIT.

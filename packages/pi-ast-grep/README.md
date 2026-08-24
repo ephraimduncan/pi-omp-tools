@@ -5,4 +5,4 @@
 - js/ts/tsx/css/html built in via `@ast-grep/napi`; python/rust/go/java/c/cpp/json/yaml via optional `@ast-grep/lang-*` grammars
 - Output matches the `search` shape: `[path#TAG]` headers + numbered rows, `skip` pagination, parse errors reported as query failures (not absence)
 
-Part of [pi-omp-tools](../../README.md). MIT.
+Part of [Lazy Prime](../../README.md). MIT.

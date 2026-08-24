@@ -6,4 +6,4 @@
 - `archive.zip:member/path` — write/replace an archive member
 - `db.sqlite:table` — insert JSON row(s); `db.sqlite:table:key` — update (JSON) or delete (empty content)
 
-Part of [pi-omp-tools](../../README.md). MIT.
+Part of [Lazy Prime](../../README.md). MIT.

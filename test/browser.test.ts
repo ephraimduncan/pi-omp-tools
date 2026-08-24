@@ -14,7 +14,7 @@ import {
 	runBrowserCode,
 	type AxNode,
 	type CdpSocket,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 
 class MockSocket implements CdpSocket {
 	readonly readyState = 1;

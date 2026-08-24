@@ -32,7 +32,7 @@ export function frameUserMessage(lines: string[], width: number, style: UserMess
 	if (lines.length === 0 || width < 8) return lines;
 
 	const contentWidth = width - 2;
-	const label = " You ";
+	const label = " α ";
 	const topFill = Math.max(0, width - 3 - label.length);
 	const top = style.border("╭─") + style.accent(label) + style.border(`${"─".repeat(topFill)}╮`);
 	const bottom = style.border(`╰${"─".repeat(width - 2)}╯`);

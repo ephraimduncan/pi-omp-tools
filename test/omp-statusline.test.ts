@@ -104,7 +104,7 @@ test("prime omp: submitted user messages render as full cards", () => {
 		truncateToWidth: (text: string, maxWidth: number) => text.slice(0, maxWidth),
 	});
 
-	assert.equal(stripAnsi(lines[0] ?? "").startsWith("╭─ You "), true);
+	assert.equal(stripAnsi(lines[0] ?? "").startsWith("╭─ α "), true);
 	assert.equal(stripAnsi(lines.at(-1) ?? ""), `╰${"─".repeat(width - 2)}╯`);
 	assert.equal(lines.length, 5);
 	assert.equal(stripAnsi(lines[1] ?? "").startsWith("│  hello"), true);
@@ -125,14 +125,15 @@ test("omp statusline: installs user-message cards through the host UI component"
 	const rendered = new HostUserMessage().render(30);
 
 	assert.equal(rendered.length, 3);
-	assert.equal(rendered[0]?.includes(" You "), true);
+	assert.equal(rendered[0]?.includes(" α "), true);
 	assert.equal(rendered.every(line => line.startsWith("\x1b[49m") && line.endsWith("\x1b[49m")), true);
 	uninstall();
 	assert.equal(HostUserMessage.prototype.render, original, "disabling omp must restore the host renderer");
 });
 
-test("omp dark themes reserve a surface only for user messages", () => {
+test("omp dark themes keep passive surfaces on the terminal background", () => {
 	const passiveSurfaces = [
+		"userMessageBg",
 		"customMessageBg",
 		"toolPendingBg",
 		"toolSuccessBg",
@@ -143,7 +144,6 @@ test("omp dark themes reserve a surface only for user messages", () => {
 	];
 	for (const name of ["omp-dark.pi.json", "omp-dark.prime.json"]) {
 		const theme = JSON.parse(readFileSync(new URL(`../themes/${name}`, import.meta.url), "utf8"));
-		assert.notEqual(theme.colors.userMessageBg, "", `${name} must distinguish submitted user messages`);
 		for (const surface of passiveSurfaces) {
 			assert.equal(theme.colors[surface] ?? "", "", `${name} ${surface} must not paint a tinted band`);
 		}

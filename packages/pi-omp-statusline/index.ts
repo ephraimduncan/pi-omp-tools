@@ -20,6 +20,7 @@ import * as os from "node:os";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { routeOmpEditorInput } from "./input.ts";
 import { onDefaultTerminalBackground, registerOmpEditorLifecycle } from "./lifecycle.ts";
+import { installUserMessageCard } from "./user-message.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: host surfaces are structurally typed
 type Any = any;
@@ -74,6 +75,7 @@ export default function ompChrome(pi: Any): void {
 	let git: GitInfo = { branch: null, staged: 0, unstaged: 0, untracked: 0 };
 	let gitTimer: ReturnType<typeof setInterval> | undefined;
 	let unregisterEditorLifecycle: (() => void) | undefined;
+	let unregisterUserMessageCard: (() => void) | undefined;
 
 	const refreshGit = (cwd: string, onDone?: () => void): void => {
 		execFile("git", ["status", "--porcelain=v1", "--branch"], { cwd, timeout: 3000 }, (error, stdout) => {
@@ -156,6 +158,10 @@ export default function ompChrome(pi: Any): void {
 	const installChrome = async (ctx: Any): Promise<void> => {
 		// @ts-ignore -- host virtual module
 		const host = (await import("@earendil-works/pi-coding-agent")) as Any;
+		unregisterUserMessageCard ??= installUserMessageCard(host.UserMessageComponent, {
+			visibleWidth,
+			truncateToWidth,
+		});
 		const BaseEditor = host.CustomEditor;
 		if (!BaseEditor) return;
 
@@ -258,6 +264,8 @@ export default function ompChrome(pi: Any): void {
 
 	const removeChrome = (ctx: Any): void => {
 		unregisterEditorLifecycle?.();
+		unregisterUserMessageCard?.();
+		unregisterUserMessageCard = undefined;
 		unregisterEditorLifecycle = undefined;
 		ctx.ui.setEditorComponent(undefined);
 		ctx.ui.setFooter(undefined);
@@ -312,6 +320,8 @@ export default function ompChrome(pi: Any): void {
 	pi.on?.("session_shutdown", async () => {
 		unregisterEditorLifecycle?.();
 		unregisterEditorLifecycle = undefined;
+		unregisterUserMessageCard?.();
+		unregisterUserMessageCard = undefined;
 		if (gitTimer) clearInterval(gitTimer);
 		gitTimer = undefined;
 	});

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { onDefaultTerminalBackground, registerOmpEditorLifecycle } from "../packages/pi-omp-statusline/lifecycle.ts";
 import { routeOmpEditorInput } from "../packages/pi-omp-statusline/input.ts";
+import { frameUserMessage, installUserMessageCard } from "../packages/pi-omp-statusline/user-message.ts";
 
 const CTRL_C = "\x03";
 
@@ -92,9 +93,46 @@ test("omp statusline: resets the background on every editor row", () => {
 	assert.equal(line.endsWith("\x1b[49m"), true);
 });
 
-test("omp dark themes leave passive surfaces on the terminal background", () => {
+test("prime omp: submitted user messages render as full cards", () => {
+	const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*m/g, "");
+	const visibleWidth = (value: string): number => stripAnsi(value).length;
+	const width = 30;
+	const lines = frameUserMessage(["  hello", "", "  second line"], width, {
+		border: (text: string) => `\x1b[90m${text}\x1b[39m`,
+		accent: (text: string) => `\x1b[33m${text}\x1b[39m`,
+		visibleWidth,
+		truncateToWidth: (text: string, maxWidth: number) => text.slice(0, maxWidth),
+	});
+
+	assert.equal(stripAnsi(lines[0] ?? "").startsWith("╭─ You "), true);
+	assert.equal(stripAnsi(lines.at(-1) ?? ""), `╰${"─".repeat(width - 2)}╯`);
+	assert.equal(lines.length, 5);
+	assert.equal(stripAnsi(lines[1] ?? "").startsWith("│  hello"), true);
+	for (const line of lines) assert.equal(visibleWidth(line), width, "every card row must fit the terminal width");
+});
+
+test("omp statusline: installs user-message cards through the host UI component", () => {
+	class HostUserMessage {
+		render(width: number): string[] {
+			return ["  hello".padEnd(width)];
+		}
+	}
+	const original = HostUserMessage.prototype.render;
+	const uninstall = installUserMessageCard(HostUserMessage, {
+		visibleWidth: value => value.replace(/\x1b\[[0-9;]*m/g, "").length,
+		truncateToWidth: (value, width) => value.slice(0, width),
+	});
+	const rendered = new HostUserMessage().render(30);
+
+	assert.equal(rendered.length, 3);
+	assert.equal(rendered[0]?.includes(" You "), true);
+	assert.equal(rendered.every(line => line.startsWith("\x1b[49m") && line.endsWith("\x1b[49m")), true);
+	uninstall();
+	assert.equal(HostUserMessage.prototype.render, original, "disabling omp must restore the host renderer");
+});
+
+test("omp dark themes reserve a surface only for user messages", () => {
 	const passiveSurfaces = [
-		"userMessageBg",
 		"customMessageBg",
 		"toolPendingBg",
 		"toolSuccessBg",
@@ -105,6 +143,7 @@ test("omp dark themes leave passive surfaces on the terminal background", () => 
 	];
 	for (const name of ["omp-dark.pi.json", "omp-dark.prime.json"]) {
 		const theme = JSON.parse(readFileSync(new URL(`../themes/${name}`, import.meta.url), "utf8"));
+		assert.notEqual(theme.colors.userMessageBg, "", `${name} must distinguish submitted user messages`);
 		for (const surface of passiveSurfaces) {
 			assert.equal(theme.colors[surface] ?? "", "", `${name} ${surface} must not paint a tinted band`);
 		}

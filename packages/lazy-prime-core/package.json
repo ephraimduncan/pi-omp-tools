@@ -1,0 +1,52 @@
+{
+  "name": "@ephraimduncan/lazy-prime-core",
+  "version": "0.1.0",
+  "description": "Shared engine for the Lazy Prime pi extensions: hashline edit, unified read, ast-grep search/rewrite, ripgrep search, glob find",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": [
+    "pi",
+    "prime-agent",
+    "lazy-prime",
+    "hashline",
+    "ast-grep"
+  ],
+  "author": "Ephraim Duncan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ephraimduncan/lazy-prime.git",
+    "directory": "packages/lazy-prime-core"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@ast-grep/napi": "^0.39.6",
+    "diff": "^9.0.0",
+    "picomatch": "^4.0.2",
+    "tinyglobby": "^0.2.15",
+    "typebox": "^1.1.24"
+  },
+  "optionalDependencies": {
+    "@ast-grep/lang-c": "^0.0.5",
+    "@ast-grep/lang-cpp": "^0.0.5",
+    "@ast-grep/lang-go": "^0.0.5",
+    "@ast-grep/lang-java": "^0.0.5",
+    "@ast-grep/lang-json": "^0.0.5",
+    "@ast-grep/lang-python": "^0.0.5",
+    "@ast-grep/lang-rust": "^0.0.5",
+    "@ast-grep/lang-yaml": "^0.0.5",
+    "@oh-my-pi/pi-natives": "^17.3.3",
+    "ws": "^8"
+  },
+  "devDependencies": {
+    "@types/picomatch": "^4.0.0"
+  }
+}

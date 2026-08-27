@@ -7,7 +7,7 @@
     "pi-package",
     "pi-extension",
     "prime-agent",
-    "oh-my-pi",
+    "lazy-prime",
     "coding-agent",
     "inspect-image",
     "vision"
@@ -16,10 +16,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "url": "git+https://github.com/ephraimduncan/lazy-prime.git",
     "directory": "packages/pi-inspect-image"
   },
-  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-inspect-image#readme",
+  "homepage": "https://github.com/ephraimduncan/lazy-prime/tree/main/packages/pi-inspect-image#readme",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -34,6 +34,6 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@ephraimduncan/omp-tools-core": "^0.1.0"
+    "@ephraimduncan/lazy-prime-core": "^0.1.0"
   }
 }

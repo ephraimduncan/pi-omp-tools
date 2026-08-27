@@ -1,5 +1,5 @@
 /**
- * Smoke tests for all omp-tools tools, run with `node --test`.
+ * Smoke tests for all Lazy Prime tools, run with `node --test`.
  */
 import * as assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -16,7 +16,7 @@ import {
 	executeSearch,
 	executeWrite,
 	registerAll,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 import piReadExtension from "../packages/pi-read/index.ts";
 
 function text(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -27,7 +27,7 @@ function text(result: { content: Array<{ type: string; text?: string }> }): stri
 }
 
 async function makeTempDir(): Promise<string> {
-	return fs.mkdtemp(path.join(os.tmpdir(), "omp-tools-test-"));
+	return fs.mkdtemp(path.join(os.tmpdir(), "lazy-prime-test-"));
 }
 
 function tagOf(output: string): string {
@@ -310,7 +310,7 @@ test("registration: all seven tools register with prompt integration", async () 
 	assert.ok(beforeAgentStart && beforeAgentStart.length > 0, "before_agent_start handler registered");
 	const outcome = (await beforeAgentStart[0]?.({ systemPrompt: "BASE PROMPT" }, {})) as { systemPrompt: string };
 	assert.match(outcome.systemPrompt, /^BASE PROMPT/);
-	assert.match(outcome.systemPrompt, /## omp-tools/);
+	assert.match(outcome.systemPrompt, /## Lazy Prime/);
 	assert.match(outcome.systemPrompt, /Anchor loop/);
 
 	// Thin package wrapper also works (uses the shared registry; contract already wired).
@@ -347,14 +347,14 @@ test("guard: bash/ipython file I/O is blocked with redirect reason", async () =>
 		// pi-style standalone bash tool
 		const blockedBash = await invoke("bash", { command: "grep -rn foo src/" });
 		assert.ok(blockedBash?.reason?.includes("search"), "bash grep should be blocked");
-		const okBash = await invoke("bash", { command: "mkdir -p x && zip -r a.zip x # omp-ok" });
+		const okBash = await invoke("bash", { command: "mkdir -p x && zip -r a.zip x # lazy-prime-ok" });
 		assert.equal(okBash, undefined);
 		// prime-style ipython %%bash cells (QA bug 1)
 		const blockedCell = await invoke("ipython", { code: "%%bash\ngrep -rn greet ." });
 		assert.ok(blockedCell?.reason?.includes("search"), "%%bash grep should be blocked");
 		const blockedCat = await invoke("ipython", { code: "%%bash\ncat app.py" });
 		assert.ok(blockedCat?.reason?.includes("read"), "%%bash cat should be blocked");
-		const okCell = await invoke("ipython", { code: "%%bash\nmkdir -p x && zip -r a.zip x # omp-ok" });
+		const okCell = await invoke("ipython", { code: "%%bash\nmkdir -p x && zip -r a.zip x # lazy-prime-ok" });
 		assert.equal(okCell, undefined);
 		const okFixture = await invoke("ipython", { code: "%%bash\nsqlite3 data.sqlite 'CREATE TABLE t(x)'" });
 		assert.equal(okFixture, undefined);
@@ -369,13 +369,13 @@ test("guard: bash/ipython file I/O is blocked with redirect reason", async () =>
 		assert.ok(blockedRemove?.reason, "os.remove should be blocked");
 		const okPy = await invoke("ipython", { code: "import math; print(math.pi)" });
 		assert.equal(okPy, undefined);
-		const okEscape = await invoke("ipython", { code: "open('data.csv','w').write(csv)  # omp-ok data export" });
+		const okEscape = await invoke("ipython", { code: "open('data.csv','w').write(csv)  # lazy-prime-ok data export" });
 		assert.equal(okEscape, undefined);
 	}
 });
 
 test("register.ts source contains no control characters (0x08 regression)", async () => {
-	const source = await fs.readFile(new URL("../packages/omp-tools-core/src/register.ts", import.meta.url), "utf8");
+	const source = await fs.readFile(new URL("../packages/lazy-prime-core/src/register.ts", import.meta.url), "utf8");
 	for (let i = 0; i < source.length; i++) {
 		const codePoint = source.charCodeAt(i);
 		assert.ok(codePoint >= 0x20 || codePoint === 0x0a || codePoint === 0x09, `control char ${codePoint} at index ${i}`);
@@ -397,7 +397,7 @@ test("edit details carry builtin-format diff for daemon replay rendering", async
 });
 
 test("edit registration carries replayBuiltInToolName and display path arg", async () => {
-	const { registerEdit } = await import("../packages/omp-tools-core/src/register.ts");
+	const { registerEdit } = await import("../packages/lazy-prime-core/src/register.ts");
 	const defs: Array<Record<string, unknown>> = [];
 	await registerEdit({ registerTool: (def: Record<string, unknown>) => defs.push(def), on: () => {} } as never);
 	const def = defs[0] as { replayBuiltInToolName?: string; prepareArguments?: (a: unknown) => unknown };
@@ -406,8 +406,8 @@ test("edit registration carries replayBuiltInToolName and display path arg", asy
 	assert.equal(prepared?.path, "src/a.ts");
 });
 
-test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
-	const { editRenderers, searchRenderers, readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+test("renderers: Lazy Prime-style boxes, gutters, and tree bodies", async () => {
+	const { editRenderers, searchRenderers, readRenderers } = await import("../packages/lazy-prime-core/src/render.ts");
 	class FakeText {
 		text: string;
 		constructor(text: string) {
@@ -487,7 +487,7 @@ test("renderers: omp-style boxes, gutters, and tree bodies", async () => {
 });
 
 test("renderers: todo box, web_search sections, github inline line", async () => {
-	const { todoRenderers, webSearchRenderers, githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	const { todoRenderers, webSearchRenderers, githubRenderers } = await import("../packages/lazy-prime-core/src/render.ts");
 	class FakeText {
 		text: string;
 		constructor(text: string) {
@@ -579,7 +579,7 @@ test("renderers: todo box, web_search sections, github inline line", async () =>
 });
 
 test("renderers: github structured layouts (repo box, pr box, search rows, run watch)", async () => {
-	const { githubRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	const { githubRenderers } = await import("../packages/lazy-prime-core/src/render.ts");
 	class FakeText {
 		text: string;
 		constructor(text: string) {
@@ -819,7 +819,7 @@ test("find/search: missing glob bases match nothing; missing plain paths error",
 });
 
 test("BUG2 regression: URL selector parsing (bare domain, trailing slash, port)", async () => {
-	const { parseUrlTarget } = await import("../packages/omp-tools-core/src/tools/read.ts");
+	const { parseUrlTarget } = await import("../packages/lazy-prime-core/src/tools/read.ts");
 	// bare domain :raw
 	const bare = parseUrlTarget("https://example.com:raw");
 	assert.equal(bare.url, "https://example.com");
@@ -848,7 +848,7 @@ test("BUG2 regression: URL selector parsing (bare domain, trailing slash, port)"
 test("read-group tracker: stamping, breaks, and session scoping", async () => {
 	// Re-wire the contract handlers onto this test's fakePi: an earlier test
 	// already consumed the once-per-process guard.
-	delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("omp-tools.contract.v1")];
+	delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("lazy-prime.contract.v1")];
 	const handlers = new Map<string, Array<(event: unknown, ctx?: unknown) => unknown>>();
 	const tools: Array<{ name: string }> = [];
 	const fakePi = {
@@ -857,7 +857,7 @@ test("read-group tracker: stamping, breaks, and session scoping", async () => {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 		},
 	};
-	const { registerRead } = await import("../packages/omp-tools-core/src/register.ts");
+	const { registerRead } = await import("../packages/lazy-prime-core/src/register.ts");
 	await registerRead(fakePi as never);
 	const readTool = tools.find(tool => tool.name === "read") as
 		| { execute: (id: string, params: object, s?: unknown, u?: unknown, ctx?: object) => Promise<{ details?: object }> }
@@ -923,7 +923,7 @@ test("read-group tracker: stamping, breaks, and session scoping", async () => {
 });
 
 test("renderers: reads collapse into one Read (N) widget without invalidate recursion", async () => {
-	const { readRenderers } = await import("../packages/omp-tools-core/src/render.ts");
+	const { readRenderers } = await import("../packages/lazy-prime-core/src/render.ts");
 	class FakeText {
 		text: string;
 		constructor(text: string) {

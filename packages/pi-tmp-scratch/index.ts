@@ -1,9 +1,9 @@
 /**
- * pi-tmp-scratch: omp-style /tmp scratch discipline for pi / prime-agent.
+ * pi-tmp-scratch: Lazy Prime /tmp scratch discipline for pi / prime-agent.
  *
- * oh-my-pi keeps throwaway work out of the repository by rooting its scratch
- * space under the OS temp dir (e.g. /tmp/omp-local/<session>) and steering the
- * model there. This package gives pi/prime-agent the same habit:
+ * Lazy Prime keeps throwaway work out of the repository by rooting its scratch
+ * space under the OS temp dir (e.g. /tmp/lazy-prime-scratch/<session>) and
+ * steering the model there. This package gives pi/prime-agent the same habit:
  *
  * - `session_start`: creates a per-session scratch directory under /tmp
  *   (falling back to os.tmpdir() when /tmp is unavailable) and exports it as
@@ -36,13 +36,13 @@ interface HostCtx {
 	ui?: { notify?: (message: string, level?: string) => void };
 }
 
-const STATE_KEY = Symbol.for("omp-tools.scratch.v1");
+const STATE_KEY = Symbol.for("lazy-prime.scratch.v1");
 const globalRegistry = globalThis as Record<PropertyKey, unknown>;
 globalRegistry[STATE_KEY] ??= {};
 const state = globalRegistry[STATE_KEY] as { dir?: string };
 
 export const SCRATCH_MARKER = "## Scratch space";
-const BASE_NAME = "pi-scratch";
+const BASE_NAME = "lazy-prime-scratch";
 
 /** Prefer the literal /tmp (the dir the user actually cleans) over the darwin
  * per-user os.tmpdir() (/var/folders/...), which survives /tmp wipes. */
@@ -70,13 +70,36 @@ function sessionSlug(ctx: unknown): string {
 	return `pid-${process.pid}`;
 }
 
-/** Create (or re-create — the user may wipe /tmp mid-session) the scratch dir. */
+/** Create (or re-create because the user can wipe /tmp mid-session) the scratch dir. */
 export function ensureScratchDir(ctx: unknown): string {
-	const dir = path.join(scratchRoot(), BASE_NAME, sessionSlug(ctx));
+	const root = scratchRoot();
+	const slug = sessionSlug(ctx);
+	const dir = path.join(root, BASE_NAME, slug);
 	fs.mkdirSync(dir, { recursive: true });
+	migratePriorScratch(root, slug, dir);
 	state.dir = dir;
 	process.env.PI_SCRATCH_DIR = dir;
 	return dir;
+}
+
+function migratePriorScratch(root: string, slug: string, destination: string): void {
+	let bases: fs.Dirent[];
+	try {
+		bases = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const base of bases) {
+		if (!base.isDirectory() || base.name === BASE_NAME || !/(?:^|-)scratch$/.test(base.name)) continue;
+		const source = path.join(root, base.name, slug);
+		try {
+			if (!fs.statSync(source).isDirectory()) continue;
+			fs.cpSync(source, destination, { recursive: true, force: false, errorOnExist: false });
+			fs.rmSync(source, { recursive: true, force: true });
+		} catch {
+			// Scratch migration must never stop session startup.
+		}
+	}
 }
 
 export function scratchBlock(dir: string): string {

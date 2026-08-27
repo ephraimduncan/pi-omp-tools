@@ -1,22 +1,25 @@
 {
-  "name": "pi-omp-tools",
+  "name": "lazy-prime",
   "private": true,
-  "description": "oh-my-pi-inspired tools for pi/prime-agent (read, write, hashline edit, search, find, ast_grep, ast_edit, bash, todo, task, ask, web_search, github, browser, inspect_image) as separate extension packages",
+  "description": "Lazy Prime tools and interface extensions for pi and prime-agent",
   "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "keywords": [
+    "lazy-prime",
     "pi-package",
     "pi-extension",
-    "prime-agent",
-    "oh-my-pi"
+    "prime-agent"
   ],
   "author": "Ephraim Duncan",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git"
+    "url": "git+https://github.com/ephraimduncan/lazy-prime.git"
+  },
+  "bin": {
+    "lazy-prime": "./bin/lazy-prime.mjs"
   },
   "pi": {
     "extensions": [
@@ -27,7 +30,8 @@
       "./packages/pi-find/index.ts",
       "./packages/pi-ast-grep/index.ts",
       "./packages/pi-ast-edit/index.ts",
-      "./packages/pi-omp-statusline/index.ts",
+      "./packages/lazy-prime-statusline/index.ts",
+      "./packages/lazy-prime-gates/index.ts",
       "./packages/pi-todo/index.ts",
       "./packages/pi-web-search/index.ts",
       "./packages/pi-github/index.ts",
@@ -37,6 +41,9 @@
       "./packages/pi-bash/index.ts",
       "./packages/pi-task/index.ts",
       "./packages/pi-ask/index.ts"
+    ],
+    "themes": [
+      "./themes/lazy-prime-dark.prime.json"
     ]
   },
   "scripts": {

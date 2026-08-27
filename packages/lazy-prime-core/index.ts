@@ -95,6 +95,15 @@ export {
 	type TaskRunResult,
 } from "./src/tools/task.ts";
 export {
+	clearTaskActivity,
+	taskActivitySource,
+	type TaskActivityEntry,
+	type TaskActivitySource,
+	type TaskBatchActivity,
+	type TaskWorkerActivity,
+	type TaskWorkerStatus,
+} from "./src/tools/task-activity.ts";
+export {
 	ASK_DESCRIPTION,
 	CHAT_OPTION,
 	executeAsk,

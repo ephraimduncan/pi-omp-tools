@@ -54,6 +54,14 @@ export interface ToolDef<P = Record<string, unknown>> {
 export interface PiApi {
 	// biome-ignore lint/suspicious/noExplicitAny: host tool defs are structurally wider
 	registerTool(def: any): void;
+	registerCommand?(
+		name: string,
+		options: { description?: string; handler: (args: string, ctx: ToolCtx) => Promise<void> | void },
+	): void;
+	registerShortcut?(
+		shortcut: string,
+		options: { description?: string; handler: (ctx: ToolCtx) => Promise<void> | void },
+	): void;
 	on?(event: string, handler: (...args: unknown[]) => unknown): void;
 }
 

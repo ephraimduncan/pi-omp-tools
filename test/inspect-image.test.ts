@@ -15,7 +15,7 @@ import {
 	MAX_IMAGE_INPUT_BYTES,
 	sniffImageMimeType,
 	ToolError,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff]);
@@ -146,7 +146,7 @@ test("inspect_image: extracts text from provider responses", () => {
 
 test("inspect_image: returns image and question when no API key is configured", async () => {
 	const keys = [
-		"OMP_TOOLS_VISION_MODEL",
+		"LAZY_PRIME_VISION_MODEL",
 		"ANTHROPIC_API_KEY",
 		"OPENAI_API_KEY",
 		"GEMINI_API_KEY",

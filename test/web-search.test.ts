@@ -8,7 +8,7 @@ import {
 	parseParallelResponse,
 	selectSearchProvider,
 	ToolError,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 
 const now = new Date("2026-08-10T12:00:00.000Z");
 
@@ -162,7 +162,7 @@ test("web_search: provider selection honors force and Exa-first fallback", () =>
 		apiKey: "parallel-key",
 	});
 	assert.deepEqual(
-		selectSearchProvider({ OMP_TOOLS_SEARCH_PROVIDER: "parallel", PARALLEL_API_KEY: "parallel-key" }),
+		selectSearchProvider({ LAZY_PRIME_SEARCH_PROVIDER: "parallel", PARALLEL_API_KEY: "parallel-key" }),
 		{ provider: "parallel", apiKey: "parallel-key" },
 	);
 });
@@ -174,7 +174,7 @@ test("web_search: provider selection reports missing keys", () => {
 			error instanceof ToolError && /EXA_API_KEY/.test(error.message) && /PARALLEL_API_KEY/.test(error.message),
 	);
 	assert.throws(
-		() => selectSearchProvider({ OMP_TOOLS_SEARCH_PROVIDER: "exa", PARALLEL_API_KEY: "parallel-key" }),
+		() => selectSearchProvider({ LAZY_PRIME_SEARCH_PROVIDER: "exa", PARALLEL_API_KEY: "parallel-key" }),
 		(error: unknown) => error instanceof ToolError && /EXA_API_KEY/.test(error.message),
 	);
 });
@@ -183,10 +183,10 @@ test("web_search: executes the selected provider and formats the tool result", a
 	const savedFetch = globalThis.fetch;
 	const savedExaKey = process.env.EXA_API_KEY;
 	const savedParallelKey = process.env.PARALLEL_API_KEY;
-	const savedProvider = process.env.OMP_TOOLS_SEARCH_PROVIDER;
+	const savedProvider = process.env.LAZY_PRIME_SEARCH_PROVIDER;
 	process.env.EXA_API_KEY = "exa-test-key";
 	delete process.env.PARALLEL_API_KEY;
-	delete process.env.OMP_TOOLS_SEARCH_PROVIDER;
+	delete process.env.LAZY_PRIME_SEARCH_PROVIDER;
 	globalThis.fetch = async () =>
 		new Response(
 			JSON.stringify({
@@ -213,7 +213,7 @@ test("web_search: executes the selected provider and formats the tool result", a
 		else process.env.EXA_API_KEY = savedExaKey;
 		if (savedParallelKey === undefined) delete process.env.PARALLEL_API_KEY;
 		else process.env.PARALLEL_API_KEY = savedParallelKey;
-		if (savedProvider === undefined) delete process.env.OMP_TOOLS_SEARCH_PROVIDER;
-		else process.env.OMP_TOOLS_SEARCH_PROVIDER = savedProvider;
+		if (savedProvider === undefined) delete process.env.LAZY_PRIME_SEARCH_PROVIDER;
+		else process.env.LAZY_PRIME_SEARCH_PROVIDER = savedProvider;
 	}
 });

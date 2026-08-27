@@ -5,7 +5,7 @@ import {
 	isTaskMouseSequence,
 	parseTaskMouseEvent,
 	type TaskTuiDeps,
-} from "../packages/omp-tools-core/src/tools/task-ui.ts";
+} from "../packages/lazy-prime-core/src/tools/task-ui.ts";
 import {
 	beginTaskActivity,
 	clearTaskActivity,
@@ -13,8 +13,8 @@ import {
 	type TaskActivitySource,
 	type TaskBatchActivity,
 	type TaskWorkerActivity,
-} from "../packages/omp-tools-core/src/tools/task-activity.ts";
-import { sanitizeTaskText } from "../packages/omp-tools-core/src/task-view.ts";
+} from "../packages/lazy-prime-core/src/tools/task-activity.ts";
+import { sanitizeTaskText } from "../packages/lazy-prime-core/src/task-view.ts";
 
 function worker(id: string, name: string): TaskWorkerActivity {
 	return {

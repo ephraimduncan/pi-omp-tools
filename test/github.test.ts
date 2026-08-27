@@ -9,7 +9,7 @@ import {
 	parseSearchDateBound,
 	type GithubParams,
 	type GithubRepoContext,
-} from "../packages/omp-tools-core/index.ts";
+} from "../packages/lazy-prime-core/index.ts";
 
 const repoCtx: GithubRepoContext = {
 	repo: "acme/widgets",

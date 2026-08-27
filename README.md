@@ -1,105 +1,99 @@
-# pi-omp-tools
+# Lazy Prime
 
-[oh-my-pi](https://github.com/can1357/oh-my-pi)-inspired file & search tools for [pi](https://pi.dev) and [prime-agent](https://github.com/earendil-works), packaged as separate extensions.
-
-Lean reimplementations of omp's tool suite, without the omp runtime:
+Lazy Prime is a set of focused file, search, workflow, and interface extensions for [pi](https://pi.dev) and [prime-agent](https://github.com/earendil-works).
 
 | Package | Tool | Description |
 |---------|------|-------------|
-| [pi-read](packages/pi-read) | `read` | Files, dirs, archives, SQLite, PDFs, notebooks, images, and URLs through one path — mints `[path#TAG]` hashline anchors |
-| [pi-write](packages/pi-write) | `write` | Create/overwrite a file, zip/tar archive entry, or SQLite row |
-| [pi-hashline-edit](packages/pi-hashline-edit) | `edit` | Hashline patches: line-anchored edits with content-hash anchors, block ops (`N*`), cut/paste registers, and stale-anchor recovery |
-| [pi-search](packages/pi-search) | `search` | ripgrep-powered regex over files/globs; output rows double as edit anchors |
-| [pi-find](packages/pi-find) | `find` | Glob path lookup, newest-first, gitignore-aware |
-| [pi-ast-grep](packages/pi-ast-grep) | `ast_grep` | Structural code queries via tree-sitter (ast-grep patterns) |
-| [pi-ast-edit](packages/pi-ast-edit) | `ast_edit` | Structural rewrites, previewed before apply |
-| [pi-todo](packages/pi-todo) | `todo` | Phased session task list. You refer to tasks by verbatim content. The earliest open task auto-promotes. |
-| [pi-task](packages/pi-task) | `task` | Fan out bounded child agents with stacked live output cards and an interactive task-agent view |
-| [pi-web-search](packages/pi-web-search) | `web_search` | One web query through Exa or Parallel. The result contains an answer and citations. |
-| [pi-github](packages/pi-github) | `github` | GitHub operations through the logged-in `gh` CLI: repositories, files, pull request create/checkout/push, issue and PR views, search, and Actions run-watch |
-| [pi-browser](packages/pi-browser) | `browser` | Persistent tabs use raw CDP. If Obscura is installed, the tool uses Obscura. If not, the tool uses a Chromium browser. The tool does not use Puppeteer. |
-| [pi-inspect-image](packages/pi-inspect-image) | `inspect_image` | Vision-model analysis of a local image file through the Anthropic, OpenAI-compatible, or Gemini APIs |
-| [pi-tmp-scratch](packages/pi-tmp-scratch) | — | Per-session scratch dir under `/tmp` + prompt steering: temporary work never lands in the repo, and wiping `/tmp` is always safe (`/scratch`, `/scratch clean`) |
+| [pi-read](packages/pi-read) | `read` | Read files, directories, archives, SQLite databases, PDFs, notebooks, images, and URLs through one path. |
+| [pi-write](packages/pi-write) | `write` | Create or overwrite files, archive entries, and SQLite rows. |
+| [pi-hashline-edit](packages/pi-hashline-edit) | `edit` | Apply line-anchored hashline patches with stale-anchor recovery. |
+| [pi-search](packages/pi-search) | `search` | Search files and globs with regex. Results also provide edit anchors. |
+| [pi-find](packages/pi-find) | `find` | Find paths by glob, newest first, with gitignore support. |
+| [pi-ast-grep](packages/pi-ast-grep) | `ast_grep` | Search code structurally with tree-sitter patterns. |
+| [pi-ast-edit](packages/pi-ast-edit) | `ast_edit` | Preview and apply structural code rewrites. |
+| [pi-bash](packages/pi-bash) | `bash` | Run shell commands with optional PTY and background jobs. |
+| [pi-todo](packages/pi-todo) | `todo` | Track phased session tasks by their full text. |
+| [pi-task](packages/pi-task) | `task` | Run independent subagent tasks in parallel. |
+| [pi-ask](packages/pi-ask) | `ask` | Ask structured follow-up questions in interactive sessions. |
+| [pi-web-search](packages/pi-web-search) | `web_search` | Search the web through Exa or Parallel and return citations. |
+| [pi-github](packages/pi-github) | `github` | Use the logged-in `gh` CLI for repository, issue, pull request, search, and Actions operations. |
+| [pi-browser](packages/pi-browser) | `browser` | Drive persistent browser tabs through CDP. |
+| [pi-inspect-image](packages/pi-inspect-image) | `inspect_image` | Analyze local images with a vision model. |
+| [pi-tmp-scratch](packages/pi-tmp-scratch) | — | Keep temporary session work under the operating system temp directory. |
+| [lazy-prime-statusline](packages/lazy-prime-statusline) | `/lazy-prime` | Add the Lazy Prime boxed editor and embedded status line. |
+| [lazy-prime-gates](packages/lazy-prime-gates) | — | Enforce Git safety and pause code, test, React effect, and public prose changes for review. |
 
-All tools share one engine ([omp-tools-core](packages/omp-tools-core)) and one snapshot store (anchored on `globalThis`, so tags minted by `read`/`search` validate in `edit` even when the tools are installed as separate packages).
+All tool wrappers share [lazy-prime-core](packages/lazy-prime-core) and one process-global snapshot store. Tags minted by `read` or `search` therefore validate in `edit` even when tools are installed as separate packages.
 
 ## Install
 
-Everything at once (recommended — the tools are designed as a unit):
+Install the full package from GitHub:
 
 ```bash
 # pi
-pi install git:github.com/ephraimduncan/pi-omp-tools
+pi install git:github.com/ephraimduncan/lazy-prime
 
 # prime-agent
-prime-agent package install git:github.com/ephraimduncan/pi-omp-tools
+prime-agent package install git:github.com/ephraimduncan/lazy-prime
 ```
 
-Or from a local clone:
+Or use a local clone. `npm link` installs the `lazy-prime` launcher on `PATH`. The Prime package command loads the extensions and theme.
 
 ```bash
-git clone https://github.com/ephraimduncan/pi-omp-tools
-cd pi-omp-tools && npm install
-prime-agent package install /path/to/pi-omp-tools        # or add to settings.json "packages"
+git clone https://github.com/ephraimduncan/lazy-prime
+cd lazy-prime
+npm install
+npm link
+prime-agent package install /path/to/lazy-prime
 ```
 
-Individual tools from a local clone — point settings at a single package:
+The Git package commands load resources only. They do not install executable files. Clone the repository and run `npm link` when you also want the `lazy-prime` command.
+
+To load one wrapper from a local clone, point the host settings at that package:
 
 ```json
-{ "packages": ["/path/to/pi-omp-tools/packages/pi-search"] }
+{ "packages": ["/path/to/lazy-prime/packages/pi-search"] }
 ```
 
-Each package under `packages/` is also npm-publish-ready (`pi install npm:@ephraimduncan/pi-search`) if you want registry installs.
+Each `pi-*` wrapper under `packages/` remains separately publishable with its existing package name.
 
-Try without installing:
+Try the full checkout without installing it:
 
 ```bash
-prime-agent -e /path/to/pi-omp-tools
-pi -e /path/to/pi-omp-tools
+prime-agent -e /path/to/lazy-prime
+pi -e /path/to/lazy-prime
 ```
 
 ## System-prompt integration
 
-Registering tools is not enough — models fall back to `bash`/`ipython` habits unless the prompt steers them. Every package wires three levers:
+Each tool wrapper adds three forms of host integration:
 
-1. **`promptGuidelines`** per tool — bullets the host appends to its default system prompt ("Use search instead of shell grep/rg …").
-2. **`before_agent_start`** — appends an `## omp-tools` workflow block describing the `read → edit` anchor loop for whichever tools are installed.
-3. **Built-in retirement** — on `session_start`, same-purpose built-ins (`grep`, `glob`, `rg`, `ls`) are deactivated when `search`/`find` are present. Same-name built-ins (`read`/`write`/`edit`) are replaced by registration. Opt out with `OMP_TOOLS_KEEP_BUILTINS=1`.
+1. **`promptGuidelines`** add focused usage guidance for that tool.
+2. **`before_agent_start`** adds the shared `## Lazy Prime` workflow block and the `read → edit` anchor loop.
+3. **Built-in retirement** deactivates overlapping built-ins such as `grep`, `glob`, `rg`, and `ls` when their Lazy Prime replacements are installed. Set `LAZY_PRIME_KEEP_BUILTINS=1` to opt out.
 
-## /tmp scratch discipline
+## Policy gates
 
-omp roots its session scratch space under the OS temp dir so throwaway work never pollutes the repository. [pi-tmp-scratch](packages/pi-tmp-scratch) ports that habit: each session gets `/tmp/pi-scratch/<session-id>` (exported as `$PI_SCRATCH_DIR`), and a `## Scratch space` system-prompt block sends all probe scripts, one-off clones, downloads, and intermediate junk there. Clean `/tmp` whenever you like — nothing durable is stored in it. `/scratch` shows the dir, `/scratch clean` empties it.
+The root package loads `lazy-prime-gates` automatically. The extension permanently blocks AI commit attribution, `--no-verify`, and fill-derived pull request bodies. It combines overlapping code reviews into one pause, so a test that contains `useEffect` receives one review instead of three.
 
-## Rich UI in prime-agent: the `prime-omp` launcher
+All gate guides ship with the package. The gates do not read files from user home directories. They cover the `bash` tool and Prime IPython shell cells.
 
-Interactive prime-agent attaches its TUI to a **daemon-hosted** session; extension render
-functions cannot cross that RPC boundary, so custom tool UIs are dropped (only the `edit`
-tool stays rich, via built-in replay). The bundled launcher uses prime's public
-`main(args, { extensionFactories })` API to run the session **in-process**, where all
-seven tools render with the full custom UI (colored diffs, gutters, match highlighting):
+## Temporary scratch space
+
+[pi-tmp-scratch](packages/pi-tmp-scratch) creates a per-session directory under `/tmp/lazy-prime-scratch`, exports it as `$PI_SCRATCH_DIR`, and guides temporary probes, clones, downloads, and generated fixtures there. `/scratch` shows the current directory. `/scratch clean` empties it.
+
+## Rich UI in prime-agent
+
+The `lazy-prime` launcher runs prime-agent in-process through its public `main(args, { extensionFactories })` API. This keeps extension renderers available for colored diffs, gutters, search highlighting, the boxed editor, and usage rows.
+
+The root package exposes the launcher as the `lazy-prime` binary. From a checkout, it can also be run directly:
 
 ```bash
-# alias it once (adjust the clone path if you use a local checkout)
-alias prime='node ~/.prime/agent/git/github.com/ephraimduncan/pi-omp-tools/bin/prime-omp.mjs'
-
-prime                  # prime-agent, in-process, full omp-tools UI
-prime -p "..."         # all normal flags pass through
+node /path/to/lazy-prime/bin/lazy-prime.mjs
+node /path/to/lazy-prime/bin/lazy-prime.mjs -p "..."
 ```
 
-Trade-offs vs plain `prime-agent`: the session lives in your terminal process (still saved
-and resumable, but not persistent in the background), with no multi-client attach or
-daemon-wide agents view. Heartbeats (`/heartbeat` and the agent's rlm-heartbeat skill) are emulated
-in-process with prime's own scheduler and store, so they work normally but only fire while
-the terminal is open; jobs persist in the session's artifact dir and are revived when the
-session is reopened. Plain `prime-agent` keeps working unchanged alongside it.
-
-## Live task-agent view
-
-While a `task` batch is running, press `Alt+T` or run `/task-agents` to open every worker in a stacked terminal view. Click a worker to select it, then click it again to focus its longer stream. `↑`/`↓` and Enter provide the same keyboard path; Escape returns to all workers and then closes the view.
-
-Mouse-wheel input stays inside the view: wheel over a card to browse that worker's history, or wheel anywhere in the focused view. Scrolling up pauses live-follow; returning to the bottom resumes it. The host transcript does not move.
-
-The interactive view requires a local TUI extension host. It works in pi and with the in-process `prime-omp` launcher above; daemon/RPC and print/JSON modes keep the non-interactive task result.
+The in-process session remains saved and resumable, but it is tied to the terminal process and cannot use multi-client attach or the agents view. Heartbeats are persisted in the session artifact directory and run while that terminal is open. Plain `prime-agent` remains unchanged and continues to work alongside Lazy Prime.
 
 ## The hashline edit loop
 
@@ -120,34 +114,28 @@ response                 →  [src/foo.ts#9F3E] updated
                             ...fresh numbers for the next edit
 ```
 
-- `PUT A.=B:` replace lines, `PUT <A:`/`PUT >A:` insert, `PUT A*:` replace the block starting at A, `CUT A.=B [@r]` delete/capture, `PUT >N @r` paste, `REM`/`MV` file ops.
-- Tags are 4-hex content hashes. A stale tag with intact anchor lines is auto-recovered by remapping through a line diff; anything ambiguous fails closed with a re-read hint.
-- Block resolution: markdown headings → sections; tree-sitter via `@ast-grep/napi` for js/ts/tsx/css/html (+ optional grammars); bracket/indentation heuristics elsewhere.
+- `PUT A.=B:` replaces lines. `PUT <A:` and `PUT >A:` insert lines. `PUT A*:` replaces a block. `CUT A.=B [@r]` captures a range. `PUT >N @r` pastes it. `REM` and `MV` remove or move a file.
+- Tags are four-character content hashes. Stale tags can recover when their anchor lines still match. Ambiguous edits fail with a re-read instruction.
+- Markdown sections, tree-sitter syntax blocks, and bracket or indentation fallbacks provide block resolution.
 
 ## Requirements
 
-- Node ≥ 20 (or Bun) in the host agent.
-- Recommended on PATH: `rg` (search/find/file-walking), `unzip`/`zip` (zip archives), `tar`, `pdftotext` (PDFs). Everything degrades gracefully without them.
-- `github` sends all operations through the `gh` CLI. Install `gh` and log in. The `gh` authentication and rate limits apply.
-- `web_search` uses `EXA_API_KEY` or `PARALLEL_API_KEY`. Set `OMP_TOOLS_SEARCH_PROVIDER=exa|parallel` to force one provider.
-- `inspect_image` uses `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (with the optional `OPENAI_BASE_URL`), or `GEMINI_API_KEY`. Set `OMP_TOOLS_VISION_MODEL=provider/model` to select one model. Without a key, the tool attaches the image, and the session model does the analysis.
-- The `browser` tool first finds Obscura, then it finds Chrome, Chromium, Edge, or Brave. Set `OBSCURA_PATH` for Obscura. Set `OMP_TOOLS_BROWSER_ENGINE=obscura|chrome` to control the automatic search. Chrome paths use `CHROME_PATH` or `OMP_TOOLS_BROWSER`.
-- `todo` keeps one list per session. If the host gives a session id, the list persists to a snapshot file, and a resumed session recovers it.
-- SQLite uses `node:sqlite` → `bun:sqlite` → `sqlite3` CLI, whichever exists.
-- Optional tree-sitter grammars (python, rust, go, java, c, cpp, json, yaml) install as `optionalDependencies`; without them `ast_grep`/`ast_edit` cover js/ts/tsx/css/html.
+- Node 20 or newer, or Bun, in the host agent.
+- Recommended commands on `PATH`: `rg`, `unzip`, `zip`, `tar`, and `pdftotext`.
+- The `github` tool requires the `gh` CLI and its existing login.
+- `web_search` uses `EXA_API_KEY` or `PARALLEL_API_KEY`. Set `LAZY_PRIME_SEARCH_PROVIDER=exa|parallel` to choose a provider.
+- `inspect_image` uses `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`. Set `LAZY_PRIME_VISION_MODEL=provider/model` to choose a model.
+- The `browser` tool discovers Obscura and Chromium-family browsers. Set `LAZY_PRIME_BROWSER_ENGINE=obscura|chrome`, `OBSCURA_PATH`, `CHROME_PATH`, or `LAZY_PRIME_BROWSER` to control discovery.
+- SQLite support uses `node:sqlite`, `bun:sqlite`, or the `sqlite3` CLI, whichever is available.
+- Optional tree-sitter grammars add Python, Rust, Go, Java, C, C++, JSON, and YAML support.
 
 ## Development
 
 ```bash
 npm install
 npm run typecheck
-npm test          # node --test test/smoke.test.ts
+npm test
 ```
-
-## Credits
-
-- [oh-my-pi](https://github.com/can1357/oh-my-pi) — tool design, the hashline patch language, and the prompt texts these descriptions are adapted from.
-- [ogulcancelik/pi-extensions](https://github.com/ogulcancelik/pi-extensions) — monorepo layout inspiration.
 
 ## License
 
@@ -157,5 +145,6 @@ MIT
 
 | Claim | Evidence |
 | --- | --- |
-| The browser tool first finds Obscura and then finds a Chromium browser. | `packages/omp-tools-core/src/tools/browser-launch.ts:45-83` |
-| The browser tool uses an isolated worker for `run` code. | `packages/omp-tools-core/src/tools/browser.ts:16` |
+| Browser discovery checks Obscura before Chromium-family browsers. | `packages/lazy-prime-core/src/tools/browser-launch.ts` |
+| Browser `run` code executes in an isolated worker. | `packages/lazy-prime-core/src/tools/browser.ts` |
+| The root launcher preserves in-process extension renderers. | `bin/lazy-prime.mjs` |

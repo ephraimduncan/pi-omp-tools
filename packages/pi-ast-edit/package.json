@@ -7,7 +7,7 @@
     "pi-package",
     "pi-extension",
     "prime-agent",
-    "oh-my-pi",
+    "lazy-prime",
     "coding-agent",
     "ast_edit"
   ],
@@ -15,10 +15,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ephraimduncan/pi-omp-tools.git",
+    "url": "git+https://github.com/ephraimduncan/lazy-prime.git",
     "directory": "packages/pi-ast-edit"
   },
-  "homepage": "https://github.com/ephraimduncan/pi-omp-tools/tree/main/packages/pi-ast-edit#readme",
+  "homepage": "https://github.com/ephraimduncan/lazy-prime/tree/main/packages/pi-ast-edit#readme",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -33,6 +33,6 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@ephraimduncan/omp-tools-core": "^0.1.0"
+    "@ephraimduncan/lazy-prime-core": "^0.1.0"
   }
 }

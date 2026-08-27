@@ -40,7 +40,39 @@ function findPrimeRoot() {
 }
 
 const primeRoot = findPrimeRoot();
-const { main } = await import(pathToFileURL(path.join(primeRoot, "dist", "index.js")).href);
+const prime = await import(pathToFileURL(path.join(primeRoot, "dist", "index.js")).href);
+const createSettings = prime.SettingsManager.create;
+prime.SettingsManager.create = function (...args) {
+	const settings = createSettings.apply(this, args);
+	const getGlobalSettings = settings.getGlobalSettings.bind(settings);
+	const getProjectSettings = settings.getProjectSettings.bind(settings);
+	let globalSettings;
+	let projectSettings;
+	const reload = settings.reload.bind(settings);
+	settings.reload = async () => {
+		await reload();
+		globalSettings = undefined;
+		projectSettings = undefined;
+	};
+	const trimPackages = (scope) => {
+		let found = false;
+		return {
+			...scope,
+			packages: (scope.packages ?? []).flatMap((entry) => {
+				const source = typeof entry === "string" ? entry : entry.source;
+				const isLazyPrime = source === "npm:lazy-prime" || source === "lazy-prime" || path.basename(path.resolve(process.cwd(), source)) === "pi-omp-tools";
+				if (!isLazyPrime) return [entry];
+				if (found) return [];
+				found = true;
+				return [{ ...(typeof entry === "string" ? { source: entry } : entry), themes: [] }];
+			}),
+		};
+	};
+	settings.getGlobalSettings = () => (globalSettings ??= trimPackages(getGlobalSettings()));
+	settings.getProjectSettings = () => (projectSettings ??= trimPackages(getProjectSettings()));
+	return settings;
+};
+const { main } = prime;
 
 // Heartbeats live in the daemon's scheduler, which in-process sessions never
 // reach; emulate them locally so /heartbeat and the rlm-heartbeat skill work.

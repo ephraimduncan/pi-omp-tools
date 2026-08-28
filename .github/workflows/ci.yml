@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Excluded (environment-dependent, not regressions — see PR body):
+      # - bash-task-ask.test.ts: hangs waiting on the host agent CLI
+      # - smoke.test.ts: spawns the `zip` binary; needs a skip guard
+      # - browser.test.ts: drives a locally installed browser via CDP;
+      #   no browser binary on the runner, so it exits before CDP opens
+      - name: Test
+        run: |
+          FILES=$(ls test/*.test.ts | grep -vE 'bash-task-ask\.test\.ts|smoke\.test\.ts|browser\.test\.ts')
+          node --test $FILES

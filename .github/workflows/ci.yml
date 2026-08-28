@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Node 24: the suite runs .ts directly via node --test (native type
+      # stripping); Node 22 fails every file with ERR_UNKNOWN_FILE_EXTENSION.
+      #
+      # Excluded pending upstream skip guards (host-CLI-dependent, fail in a
+      # clean environment): test/bash-task-ask.test.ts (hangs awaiting host
+      # CLI), test/smoke.test.ts (spawn ENOENT).
+      - name: Test
+        run: |
+          FILES=$(ls test/*.test.ts | grep -vE 'bash-task-ask\.test\.ts|smoke\.test\.ts')
+          node --test $FILES
